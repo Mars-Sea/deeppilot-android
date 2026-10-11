@@ -1,5 +1,6 @@
 package dev.hailab.deeppilot.ui.screens
 
+import android.content.ClipboardManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,6 +35,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.journeyapps.barcodescanner.ScanContract
@@ -57,6 +60,7 @@ fun PairScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<Throwable?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     fun submit(value: String) {
         if (busy || value.isBlank()) return
@@ -133,6 +137,17 @@ fun PairScreen(
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             )
+            TextButton(
+                onClick = {
+                    val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip
+                    val pasted = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+                    if (!pasted.isNullOrBlank()) {
+                        text = pasted.trim()
+                        error = null
+                    }
+                },
+                enabled = !busy,
+            ) { Text(stringResource(R.string.pair_paste)) }
             if (preview != null) {
                 Text(stringResource(R.string.pair_host_preview, preview), style = MaterialTheme.typography.bodyMedium)
             }

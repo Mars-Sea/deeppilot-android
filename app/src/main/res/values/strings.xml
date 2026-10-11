@@ -45,6 +45,7 @@
     <string name="pair_scan">Scan QR code</string>
     <string name="pair_scan_prompt">Scan the DeepPilot pairing code</string>
     <string name="pair_paste_hint">Or paste the link (deeppilot://pair?…)</string>
+    <string name="pair_paste">Paste from clipboard</string>
     <string name="pair_link_label">Pairing link</string>
     <string name="pair_host_preview">Host: %1$s</string>
     <string name="pair_submit">Pair</string>

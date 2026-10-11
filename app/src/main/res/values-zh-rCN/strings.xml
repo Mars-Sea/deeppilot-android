@@ -44,6 +44,7 @@
     <string name="pair_scan">扫描二维码</string>
     <string name="pair_scan_prompt">扫描 DeepPilot 配对二维码</string>
     <string name="pair_paste_hint">或粘贴链接（deeppilot://pair?…）</string>
+    <string name="pair_paste">从剪贴板粘贴</string>
     <string name="pair_link_label">配对链接</string>
     <string name="pair_host_preview">主机：%1$s</string>
     <string name="pair_submit">配对</string>
