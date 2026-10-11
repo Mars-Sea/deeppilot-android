@@ -38,6 +38,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,6 +63,7 @@ import dev.hailab.deeppilot.core.protocol.MessageProjection
 import dev.hailab.deeppilot.ui.attempt
 import dev.hailab.deeppilot.ui.connectionText
 import dev.hailab.deeppilot.ui.errorMessage
+import dev.hailab.deeppilot.ui.markdown.MarkdownMessage
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -97,17 +102,25 @@ fun SessionScreen(repository: BridgeRepository, sessionId: String, onBack: () ->
     val atBottom by remember {
         derivedStateOf {
             val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            last >= info.totalItemsCount - 2
+            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
+            last.index >= info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 8
         }
     }
+    // Follow the conversation while the user is at the bottom; stop once they scroll up.
+    var stickToBottom by remember(sessionId) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { if (it is DragInteraction.Start) stickToBottom = false }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling -> if (!scrolling && atBottom) stickToBottom = true }
+    }
+    // Bumped when a rendered message changes height (Markdown and formulas lay out after load).
+    var layoutTick by remember { mutableIntStateOf(0) }
     val tailKey = messages.lastOrNull()?.let { it.seq to (it.text?.length ?: 0) + (it.thinking?.length ?: 0) }
-    var initialScrollDone by remember(sessionId) { mutableStateOf(false) }
-    LaunchedEffect(tailKey, approvals.size, questions.size) {
-        if (itemCount == 0) return@LaunchedEffect
-        if (!initialScrollDone || atBottom) {
+    LaunchedEffect(tailKey, approvals.size, questions.size, layoutTick) {
+        if (itemCount > 0 && stickToBottom) {
             listState.scrollToItem(itemCount - 1)
-            initialScrollDone = true
+            listState.scrollBy(1_000_000f)
         }
     }
 
@@ -177,7 +190,7 @@ fun SessionScreen(repository: BridgeRepository, sessionId: String, onBack: () ->
                     }
                 }
             }
-            items(messages, key = { "m${it.seq}" }) { MessageRow(it) }
+            items(messages, key = { "m${it.seq}" }) { MessageRow(it, onHeightChanged = { layoutTick++ }) }
             items(approvals, key = { "a${it.requestId}" }) { approval ->
                 ApprovalCard(approval, enabled = connected) { allow, onFailed ->
                     scope.launch {
@@ -238,7 +251,7 @@ private fun Composer(
 }
 
 @Composable
-private fun MessageRow(message: MessageProjection) {
+private fun MessageRow(message: MessageProjection, onHeightChanged: () -> Unit) {
     when (message.role) {
         "user" -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
             Surface(
@@ -262,10 +275,11 @@ private fun MessageRow(message: MessageProjection) {
             message.thinking?.takeIf { it.isNotBlank() }?.let { ThinkingBlock(it, message.streaming && message.text.isNullOrEmpty()) }
             val text = message.text.orEmpty()
             if (text.isNotEmpty() || (message.streaming && message.thinking.isNullOrEmpty())) {
-                SelectionContainer {
-                    // Phase 1 renders plain text; Markdown and KaTeX (WebView) come next.
-                    Text(if (message.streaming) "$text▍" else text, style = MaterialTheme.typography.bodyLarge)
-                }
+                MarkdownMessage(
+                    markdown = if (message.streaming) "$text▍" else text,
+                    key = message.seq,
+                    onHeightChanged = onHeightChanged,
+                )
             }
         }
     }

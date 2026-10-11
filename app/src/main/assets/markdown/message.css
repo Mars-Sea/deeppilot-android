@@ -1,0 +1,30 @@
+:root {
+  --text: #1b1b1f; --muted: #5d5e66; --link: #4d6bfe;
+  --code-bg: rgba(127, 127, 127, 0.14); --border: rgba(127, 127, 127, 0.35);
+  color-scheme: light dark;
+}
+html, body { margin: 0; padding: 0; background: transparent; }
+body {
+  color: var(--text);
+  font: 16px/1.55 -apple-system, "Roboto", "Noto Sans CJK SC", sans-serif;
+  overflow-wrap: anywhere;
+  -webkit-text-size-adjust: none;
+}
+#content > :first-child { margin-top: 0; }
+#content > :last-child { margin-bottom: 0; }
+p, ul, ol, pre, table, blockquote { margin: 0 0 0.7em; }
+h1, h2, h3, h4 { margin: 1em 0 0.5em; line-height: 1.3; }
+h1 { font-size: 1.35em; } h2 { font-size: 1.22em; } h3 { font-size: 1.1em; } h4 { font-size: 1em; }
+ul, ol { padding-left: 1.4em; }
+li > p { margin: 0; }
+a { color: var(--link); }
+code { font-family: "Roboto Mono", monospace; font-size: 0.88em; background: var(--code-bg); border-radius: 4px; padding: 0.1em 0.3em; }
+pre { background: var(--code-bg); border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+pre code { background: none; padding: 0; font-size: 0.85em; line-height: 1.45; }
+blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--muted); margin-left: 0; }
+table { border-collapse: collapse; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 4px 8px; }
+hr { border: none; border-top: 1px solid var(--border); }
+.katex { font-size: 1.08em; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; margin: 0.4em 0; }
+.katex-error { color: var(--muted); }

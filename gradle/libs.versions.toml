@@ -11,6 +11,7 @@ lifecycle = "2.9.2"
 navigation = "2.9.2"
 coreKtx = "1.16.0"
 zxingEmbedded = "4.3.0"
+webkit = "1.14.0"
 
 [libraries]
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -35,6 +36,7 @@ androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling
 androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 androidx-compose-material-icons = { module = "androidx.compose.material:material-icons-extended" }
+androidx-webkit = { module = "androidx.webkit:webkit", version.ref = "webkit" }
 zxing-android-embedded = { module = "com.journeyapps:zxing-android-embedded", version.ref = "zxingEmbedded" }
 
 [plugins]

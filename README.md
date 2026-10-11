@@ -10,6 +10,7 @@ DeepPilot 是 [DeepSeek Harness（DSH）](https://www.npmjs.com/package/dsh-deep
 
 - 扫码或粘贴 `deeppilot://pair?…` 链接配对；局域网自签证书按 SPKI 指纹固定，设备私钥存在 Android Keystore（有 StrongBox 时用 StrongBox）。
 - 会话列表、会话详情（流式回复、思考过程、工具调用）、发送消息、停止当前回合。
+- 助手回复按 Markdown 显示，公式（`$…$`、`\(…\)`、`$$…$$`、`\[…\]`、```` ```math ````）用内置 KaTeX 排版，与 iOS 版和网页版一致；渲染页面不联网。
 - 在手机上处理审批和提问。
 - 通知：一期没有远程推送。打开“保持连接”后，前台服务一直连着 Mac，回复完成、审批、提问和出错都会弹本地通知。
   国行手机还需要在系统设置里允许自启动、后台活动和不限制电池。厂商推送通道放在二期。
@@ -26,6 +27,11 @@ DeepPilot 是 [DeepSeek Harness（DSH）](https://www.npmjs.com/package/dsh-deep
 - `core` 模块是纯 Kotlin/JVM（协议、配对、签名、TLS 固定、连接客户端），没有 Android SDK 也能 `./gradlew :core:test`。
 
 正式签名只在打 `v*` tag 时由 GitHub Actions 完成，密钥放在仓库 Secrets 里，不进仓库。
+
+## 第三方组件
+
+- [KaTeX](https://github.com/KaTeX/KaTeX) 0.18.7（MIT）和 [marked](https://github.com/markedjs/marked) 18.0.13（MIT），放在 `app/src/main/assets/markdown/`，许可证随文件附带。
+- [ZXing Android Embedded](https://github.com/journeyapps/zxing-android-embedded)（Apache-2.0），用于扫码。
 
 ## 许可证
 

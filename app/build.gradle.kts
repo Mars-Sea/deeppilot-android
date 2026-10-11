@@ -66,6 +66,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.lifecycle.service)
     implementation(libs.androidx.navigation.compose)
+    // Markdown + KaTeX messages are served from assets via WebViewAssetLoader.
+    implementation(libs.androidx.webkit)
     // QR scanning without Google Play services (ML Kit needs them on most builds).
     implementation(libs.zxing.android.embedded)
 
