@@ -25,22 +25,10 @@ import kotlinx.coroutines.launch
  */
 class ConnectionService : LifecycleService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var observing = false
 
     override fun onCreate() {
         super.onCreate()
-        if (!enterForeground(describe(graph.client.state.value))) return
-        lifecycleScope.launch {
-            graph.client.state.collect { state ->
-                if (graph.store.loadHost() == null) {
-                    stopSelf()
-                } else {
-                    runCatching {
-                        getSystemService(android.app.NotificationManager::class.java)
-                            .notify(Notifier.CONNECTION_NOTIFICATION_ID, graph.notifier.connectionNotification(describe(state)))
-                    }
-                }
-            }
-        }
         // A new network usually means the old socket is dead; reconnect without waiting for backoff.
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -55,9 +43,16 @@ class ConnectionService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        // Every startForegroundService() call needs its own startForeground(), even when
+        // the service is already running; otherwise the system kills the app.
+        if (!enterForeground(describe(graph.client.state.value))) return START_NOT_STICKY
         if (!graph.store.keepConnected || graph.store.loadHost() == null) {
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (!observing) {
+            observing = true
+            observeConnection()
         }
         graph.client.poke()
         return START_STICKY
@@ -69,6 +64,22 @@ class ConnectionService : LifecycleService() {
         }
         networkCallback = null
         super.onDestroy()
+    }
+
+    /** Keeps the notification text current; stops once the host is unpaired. Runs only while in the foreground. */
+    private fun observeConnection() {
+        lifecycleScope.launch {
+            graph.client.state.collect { state ->
+                if (graph.store.loadHost() == null) {
+                    stopSelf()
+                } else {
+                    runCatching {
+                        getSystemService(android.app.NotificationManager::class.java)
+                            .notify(Notifier.CONNECTION_NOTIFICATION_ID, graph.notifier.connectionNotification(describe(state)))
+                    }
+                }
+            }
+        }
     }
 
     /** False when the system refused (e.g. a sticky restart from the background on Android 12+). */
