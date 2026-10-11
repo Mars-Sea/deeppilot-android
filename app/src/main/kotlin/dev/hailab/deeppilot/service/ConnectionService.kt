@@ -84,6 +84,8 @@ class ConnectionService : LifecycleService() {
 
     /** False when the system refused (e.g. a sticky restart from the background on Android 12+). */
     private fun enterForeground(text: String): Boolean {
+        // The channel must exist before startForeground, or the system rejects the notification.
+        graph.notifier.createChannels()
         val notification = graph.notifier.connectionNotification(text)
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
