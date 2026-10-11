@@ -55,6 +55,7 @@ fun Context.errorMessage(error: Throwable): String = when (error) {
     is PairingFailure.AudienceMismatch, is PairingFailure.FingerprintMismatch -> getString(R.string.failure_audience)
     is PairingFailure.Untrusted -> trustMessage(error.rejection)
     is PairingFailure.Network -> getString(R.string.pair_error_network)
+    is PairingFailure.HttpStatus -> getString(R.string.pair_error_http, error.status)
     is PairingFailure -> getString(R.string.pair_error_generic)
     is NotConnectedException -> getString(R.string.error_not_connected)
     is TimeoutCancellationException -> getString(R.string.error_timeout)

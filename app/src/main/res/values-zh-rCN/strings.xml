@@ -52,6 +52,7 @@
     <string name="pair_error_expired">配对码已过期。</string>
     <string name="pair_error_full">Mac 上配对的设备已满，请先移除一台。</string>
     <string name="pair_error_generic">配对失败。</string>
+    <string name="pair_error_http">配对失败（HTTP %1$d）。</string>
     <string name="pair_error_invalid">这不是有效的 DeepPilot 配对链接。</string>
     <string name="pair_error_network">连不上 Mac，请确认手机和 Mac 在同一网络。</string>
     <string name="pair_error_rate">尝试次数过多，请稍等一分钟再试。</string>

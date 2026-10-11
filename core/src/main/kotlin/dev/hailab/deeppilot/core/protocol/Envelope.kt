@@ -12,11 +12,13 @@ const val PROTOCOL_VERSION = 2
 /**
  * Shared JSON configuration. v2 adds optional fields over time, so unknown keys
  * are ignored (PROTOCOL.md §10), and absent optionals are not written as null.
+ * Defaults are written: the bridge requires `v` on every request, and fields
+ * such as `scopes` and `selected` must be sent even at their default value.
  */
 val BridgeJson: Json = Json {
     ignoreUnknownKeys = true
     explicitNulls = false
-    encodeDefaults = false
+    encodeDefaults = true
     coerceInputValues = true
 }
 

@@ -53,6 +53,7 @@
     <string name="pair_error_expired">This pairing code has expired.</string>
     <string name="pair_error_full">Your Mac has too many paired devices. Remove one first.</string>
     <string name="pair_error_generic">Pairing failed.</string>
+    <string name="pair_error_http">Pairing failed (HTTP %1$d).</string>
     <string name="pair_error_invalid">This is not a valid DeepPilot pairing link.</string>
     <string name="pair_error_network">Could not reach your Mac. Check that both are on the same network.</string>
     <string name="pair_error_rate">Too many attempts. Wait a minute and try again.</string>
