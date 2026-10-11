@@ -60,6 +60,7 @@ import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.bridge.ConnectionState
 import dev.hailab.deeppilot.core.protocol.MessageProjection
+import dev.hailab.deeppilot.core.session.ToolFolding
 import dev.hailab.deeppilot.ui.attempt
 import dev.hailab.deeppilot.ui.connectionText
 import dev.hailab.deeppilot.ui.errorMessage
@@ -82,7 +83,7 @@ fun SessionScreen(repository: BridgeRepository, sessionId: String, onBack: () ->
     val questions = allQuestions.filter { it.sessionId == sessionId }
 
     val state = open?.takeIf { it.sessionId == sessionId }
-    val messages = state?.messages.orEmpty()
+    val messages = remember(state?.messages) { ToolFolding.fold(state?.messages.orEmpty()) }
     val title = sessions.firstOrNull { it.id == sessionId }?.title?.ifBlank { null } ?: stringResource(R.string.session_untitled)
     val connected = connection is ConnectionState.Authenticated
     val running = state?.turnRunning == true
