@@ -175,12 +175,20 @@ fun PromptComposer(
                 }
                 if (expanded) {
                     Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        ModelButton(models, modelsLoading, modelsError, onOpenModels)
-                        val reasoning = models?.model()?.reasoning
-                        if (models != null && reasoning != null && reasoning.efforts.isNotEmpty()) {
-                            EffortButton(models, reasoning, changingEffort, enabled = !changingEffort && !working, onSelectEffort)
+                        // The selectors share whatever the buttons leave, so narrow phones never squeeze send.
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ModelButton(
+                                models,
+                                modelsLoading,
+                                modelsError,
+                                onOpenModels,
+                                Modifier.weight(1f).widthIn(max = ModelButtonWidth),
+                            )
+                            val reasoning = models?.model()?.reasoning
+                            if (models != null && reasoning != null && reasoning.efforts.isNotEmpty()) {
+                                EffortButton(models, reasoning, changingEffort, enabled = !changingEffort && !working, onSelectEffort)
+                            }
                         }
-                        Spacer(Modifier.weight(1f).widthIn(min = 4.dp))
                         attach()
                         send()
                     }
@@ -202,14 +210,13 @@ private fun AttachButton(onClick: () -> Unit) {
 
 /** Borderless model selector, fixed width so the controls after it never move. */
 @Composable
-private fun ModelButton(models: SessionModels?, loading: Boolean, error: String?, onClick: () -> Unit) {
+private fun ModelButton(models: SessionModels?, loading: Boolean, error: String?, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val p = palette
     val title = models?.displayName() ?: stringResource(R.string.model_fallback_title)
     val color = if (error != null && models == null) p.danger else p.foreground
     val label = stringResource(R.string.model_current_a11y, title)
     Row(
-        Modifier
-            .width(ModelButtonWidth)
+        modifier
             .height(32.dp)
             .semantics { contentDescription = label }
             .plainClickable(onClick = onClick)
