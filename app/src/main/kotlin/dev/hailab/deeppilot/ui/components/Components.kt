@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -42,9 +43,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -116,16 +117,19 @@ fun SettingsRow(
     }
 }
 
-/** The app icon: the launcher glyph on the brand color with iOS corner rounding (22.5%). */
+/** iOS `AppIconArtwork`: the gradient glyph on white, padded 13%, radius 22.5%, soft shadow. */
 @Composable
 fun AppIcon(size: Dp) {
+    val shape = RoundedCornerShape(size * 0.225f)
     Box(
         Modifier
             .size(size)
-            .clip(RoundedCornerShape(size * 0.225f))
-            .background(colorResource(R.color.launcher_background)),
+            .shadow(2.dp, shape, ambientColor = Color.Black.copy(alpha = 0.14f), spotColor = Color.Black.copy(alpha = 0.14f))
+            .clip(shape)
+            .background(Color.White)
+            .padding(size * 0.13f),
     ) {
-        Image(painterResource(R.drawable.ic_launcher_foreground), contentDescription = null, modifier = Modifier.size(size))
+        Image(painterResource(R.drawable.app_icon_glyph), contentDescription = null, modifier = Modifier.fillMaxSize())
     }
 }
 
