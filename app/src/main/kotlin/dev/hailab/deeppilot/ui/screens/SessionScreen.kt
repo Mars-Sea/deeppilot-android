@@ -235,7 +235,6 @@ fun SessionScreen(
     }
 
     // Model catalog for this session (§4), loaded once connected and supported.
-    val capabilities by repository.capabilities.collectAsStateWithLifecycle()
     var models by remember(sessionId) { mutableStateOf<SessionModels?>(null) }
     var modelsLoading by remember { mutableStateOf(false) }
     var modelsError by remember { mutableStateOf<String?>(null) }
