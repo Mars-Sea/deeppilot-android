@@ -810,7 +810,7 @@ fun NewSessionPicker(repository: BridgeRepository, onDismiss: () -> Unit, onCrea
                     }
                 }
             }
-            AnimatedVisibility(creating, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
+            androidx.compose.animation.AnimatedVisibility(creating, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
                 Row(
                     Modifier
                         .height(48.dp)

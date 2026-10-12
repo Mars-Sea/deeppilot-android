@@ -221,7 +221,7 @@ fun SessionScreen(
                 }
             }
 
-            AnimatedVisibility(
+            androidx.compose.animation.AnimatedVisibility(
                 visible = !atBottom,
                 enter = fadeIn() + scaleIn(initialScale = 0.9f),
                 exit = fadeOut() + scaleOut(targetScale = 0.9f),
