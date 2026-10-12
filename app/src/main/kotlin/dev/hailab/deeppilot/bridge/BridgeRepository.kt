@@ -6,9 +6,12 @@ import dev.hailab.deeppilot.core.attachments.PromptAttachment
 import dev.hailab.deeppilot.core.attachments.promptDocuments
 import dev.hailab.deeppilot.core.attachments.promptImages
 import dev.hailab.deeppilot.core.bridge.BridgeClient
+import dev.hailab.deeppilot.core.bridge.BridgeException
 import dev.hailab.deeppilot.core.bridge.ConnectionState
 import dev.hailab.deeppilot.core.bridge.HostCredentials
 import dev.hailab.deeppilot.core.bridge.NotConnectedException
+import dev.hailab.deeppilot.core.delivery.PendingSend
+import dev.hailab.deeppilot.core.delivery.PromptOutbox
 import dev.hailab.deeppilot.core.pairing.PairingClient
 import dev.hailab.deeppilot.core.pairing.PairingLink
 import dev.hailab.deeppilot.core.protocol.ApprovalRespond
@@ -30,6 +33,8 @@ import dev.hailab.deeppilot.core.protocol.PendingApproval
 import dev.hailab.deeppilot.core.protocol.PendingCleared
 import dev.hailab.deeppilot.core.protocol.PendingQuestion
 import dev.hailab.deeppilot.core.protocol.PendingSnapshot
+import dev.hailab.deeppilot.core.protocol.PromptDeliveryQuery
+import dev.hailab.deeppilot.core.protocol.PromptReceipt
 import dev.hailab.deeppilot.core.protocol.QuestionAnswer
 import dev.hailab.deeppilot.core.protocol.QuestionRespond
 import dev.hailab.deeppilot.core.protocol.ScheduleCreate
@@ -62,6 +67,7 @@ import dev.hailab.deeppilot.core.protocol.SessionTail
 import dev.hailab.deeppilot.core.protocol.SessionsDelta
 import dev.hailab.deeppilot.core.protocol.SessionsSnapshot
 import dev.hailab.deeppilot.core.protocol.WelcomeCapabilities
+import dev.hailab.deeppilot.core.protocol.WireErrorCode
 import dev.hailab.deeppilot.core.protocol.Workspace
 import dev.hailab.deeppilot.core.protocol.WorkspaceCreate
 import dev.hailab.deeppilot.core.protocol.WorkspaceCreated
@@ -72,11 +78,15 @@ import dev.hailab.deeppilot.core.session.SessionList
 import dev.hailab.deeppilot.core.session.SessionReducer
 import dev.hailab.deeppilot.data.DeviceIdentity
 import dev.hailab.deeppilot.data.InstanceStore
+import dev.hailab.deeppilot.data.PromptOutboxStore
 import dev.hailab.deeppilot.notify.Notifier
 import dev.hailab.deeppilot.security.DeviceKeys
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -101,6 +111,7 @@ class BridgeRepository(
     private val appVersion: String,
     private val scope: CoroutineScope,
     private val images: AttachmentImages,
+    private val outbox: PromptOutboxStore,
 ) {
     val connection: StateFlow<ConnectionState> = client.state
 
@@ -126,6 +137,14 @@ class BridgeRepository(
     /** Automation tasks of the session whose task list was last requested. */
     val schedules: StateFlow<ScheduleState?> = _schedules.asStateFlow()
 
+    private val _pendingSends = MutableStateFlow(_host.value?.let { outbox.load(it.profileId) }.orEmpty())
+    /** Prompts whose delivery the host has not confirmed (§10), persisted per host. */
+    val pendingSends: StateFlow<List<PendingSend>> = _pendingSends.asStateFlow()
+    private val outboxLock = Any()
+    /** Sends still waiting for their own ack; reconciliation leaves them alone. */
+    private val inFlightSends = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var reconciling = false
+
     private val deduper = NotificationDeduper()
 
     fun start() {
@@ -135,6 +154,7 @@ class BridgeRepository(
                 if (state is ConnectionState.Authenticated) {
                     _capabilities.value = state.welcome.capabilities
                     refresh()
+                    reconcileDeliveries()
                 }
             }
         }
@@ -164,6 +184,7 @@ class BridgeRepository(
         )
         store.saveHost(credentials)
         _host.value = credentials
+        _pendingSends.value = emptyList()
         client.start(credentials)
     }
 
@@ -187,6 +208,8 @@ class BridgeRepository(
         _questions.value = emptyList()
         _openSession.value = null
         _schedules.value = null
+        outbox.clear(credentials.profileId)
+        _pendingSends.value = emptyList()
         notifier.cancelAll()
         scope.launch { images.clear(credentials.profileId) }
     }
@@ -238,14 +261,96 @@ class BridgeRepository(
 
     // ---------- writes (throw on failure so the screen can say so) ----------
 
+    /**
+     * Sends a prompt. With `promptDelivery` the send gets a stable identity that is
+     * saved before the request; an ack that never arrives leaves the row "unknown"
+     * and throws [PromptUnconfirmedException] rather than inviting a duplicate resend.
+     */
     suspend fun sendPrompt(sessionId: String, text: String, attachments: List<PromptAttachment> = emptyList()) {
         requireAuthenticated()
-        client.request(
-            FrameType.SESSION_SEND_PROMPT,
-            SendPrompt.serializer(),
-            SendPrompt(sessionId, text, images = attachments.promptImages(), documents = attachments.promptDocuments()),
-            timeoutMillis = PromptAttachment.sendTimeoutMillis(attachments),
-        )
+        val timeout = PromptAttachment.sendTimeoutMillis(attachments)
+        val payload = SendPrompt(sessionId, text, images = attachments.promptImages(), documents = attachments.promptDocuments())
+        val profileId = _host.value?.profileId
+        if (_capabilities.value?.promptDelivery != true || profileId == null) {
+            client.request(FrameType.SESSION_SEND_PROMPT, SendPrompt.serializer(), payload, timeoutMillis = timeout)
+            return
+        }
+        val pending = PendingSend(ClientRequestId.make(), sessionId, text, attachments.size)
+        val id = pending.clientSendId
+        commitOutbox(profileId, required = true) { PromptOutbox.add(it, pending) }
+        inFlightSends += id
+        try {
+            val reply = try {
+                client.request(FrameType.SESSION_SEND_PROMPT, SendPrompt.serializer(), payload.copy(clientSendId = id), timeoutMillis = timeout)
+            } catch (e: Exception) {
+                if (e is BridgeException && e.code?.let { it in DEFINITE_REJECTIONS } == true) {
+                    commitOutbox(profileId) { PromptOutbox.remove(it, id) }
+                    throw e
+                }
+                commitOutbox(profileId) { PromptOutbox.mark(it, id, PendingSend.Delivery.Unknown) }
+                if (e is CancellationException && e !is TimeoutCancellationException) throw e
+                throw PromptUnconfirmedException()
+            }
+            val receipt = reply.decode(PromptReceipt.serializer())?.takeIf { it.clientSendId == id }
+            when (receipt?.status) {
+                "accepted" -> commitOutbox(profileId) { PromptOutbox.remove(it, id) }
+                "rejected" -> {
+                    commitOutbox(profileId) { PromptOutbox.remove(it, id) }
+                    throw PromptRejectedException()
+                }
+                else -> {
+                    commitOutbox(profileId) { PromptOutbox.mark(it, id, PendingSend.Delivery.Unknown) }
+                    throw PromptUnconfirmedException()
+                }
+            }
+        } finally {
+            inFlightSends -= id
+        }
+    }
+
+    /**
+     * Asks the host about every unconfirmed send not waiting on its own ack.
+     * Accepted rows clear; nothing is ever resent.
+     */
+    fun reconcileDeliveries() {
+        val profileId = _host.value?.profileId ?: return
+        if (_capabilities.value?.promptDelivery != true || connection.value !is ConnectionState.Authenticated || reconciling) return
+        reconciling = true
+        scope.launch {
+            try {
+                val rows = _pendingSends.value.filter { it.delivery != PendingSend.Delivery.Rejected && it.clientSendId !in inFlightSends }
+                for (row in rows) {
+                    val receipt = runCatching {
+                        client.request(
+                            FrameType.SESSION_DELIVERY,
+                            PromptDeliveryQuery.serializer(),
+                            PromptDeliveryQuery(row.sessionId, row.clientSendId),
+                            timeoutMillis = 3_000,
+                        ).decode(PromptReceipt.serializer())
+                    }.getOrNull() ?: return@launch
+                    if (receipt.clientSendId != row.clientSendId || _host.value?.profileId != profileId) return@launch
+                    commitOutbox(profileId) { PromptOutbox.apply(it, receipt) }
+                }
+            } finally {
+                reconciling = false
+            }
+        }
+    }
+
+    /** Retires an unconfirmed or rejected marker the user has acknowledged. */
+    fun dismissPendingSend(clientSendId: String) {
+        val profileId = _host.value?.profileId ?: return
+        if (clientSendId in inFlightSends) return
+        commitOutbox(profileId) { PromptOutbox.remove(it, clientSendId) }
+    }
+
+    /** Applies [change] and persists it; only a [required] write fails the caller. */
+    private fun commitOutbox(profileId: String, required: Boolean = false, change: (List<PendingSend>) -> List<PendingSend>) {
+        synchronized(outboxLock) {
+            val next = change(_pendingSends.value)
+            if (!outbox.save(profileId, next) && required) throw OutboxSaveException()
+            _pendingSends.value = next
+        }
     }
 
     /** The host's model catalog for [sessionId] (§4); never built into the app. */
@@ -580,6 +685,15 @@ class BridgeRepository(
     }
 
     private companion object {
+        /** Errors that prove the host did not take the prompt (iOS `isDefiniteRejection`). */
+        val DEFINITE_REJECTIONS = setOf(
+            WireErrorCode.E_AUTH,
+            WireErrorCode.E_FORBIDDEN,
+            WireErrorCode.E_PROTOCOL,
+            WireErrorCode.E_NOT_FOUND,
+            WireErrorCode.E_BUSY,
+            WireErrorCode.E_UNSUPPORTED,
+        )
         const val TAIL_COUNT = 60
     }
 }

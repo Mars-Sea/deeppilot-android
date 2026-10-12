@@ -8,6 +8,7 @@ import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.bridge.BridgeClient
 import dev.hailab.deeppilot.data.DeviceIdentity
 import dev.hailab.deeppilot.data.InstanceStore
+import dev.hailab.deeppilot.data.PromptOutboxStore
 import dev.hailab.deeppilot.notify.Notifier
 import dev.hailab.deeppilot.security.DeviceKeys
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +47,7 @@ class AppGraph(private val app: Application) {
         appVersion = BuildConfig.VERSION_NAME,
         scope = scope,
         images = AttachmentImages(app.cacheDir),
+        outbox = PromptOutboxStore(app),
     )
     val preferences = AppPreferences(app)
 

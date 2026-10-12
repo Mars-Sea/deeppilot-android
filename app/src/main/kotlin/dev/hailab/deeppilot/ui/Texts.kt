@@ -7,11 +7,15 @@ import androidx.compose.ui.res.stringResource
 import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.attachments.AttachmentException
 import dev.hailab.deeppilot.bridge.InvalidResponseException
+import dev.hailab.deeppilot.bridge.OutboxSaveException
+import dev.hailab.deeppilot.bridge.PromptRejectedException
+import dev.hailab.deeppilot.bridge.PromptUnconfirmedException
 import dev.hailab.deeppilot.bridge.UnsupportedFeatureException
 import dev.hailab.deeppilot.core.bridge.BridgeException
 import dev.hailab.deeppilot.core.bridge.ConnectionState
 import dev.hailab.deeppilot.core.bridge.FailureReason
 import dev.hailab.deeppilot.core.bridge.NotConnectedException
+import dev.hailab.deeppilot.core.delivery.OutboxFullException
 import dev.hailab.deeppilot.core.pairing.PairingError
 import dev.hailab.deeppilot.core.pairing.PairingException
 import dev.hailab.deeppilot.core.pairing.PairingFailure
@@ -63,6 +67,10 @@ fun Context.errorMessage(error: Throwable): String = when (error) {
     is NotConnectedException -> getString(R.string.error_not_connected)
     is UnsupportedFeatureException -> getString(R.string.error_unsupported)
     is InvalidResponseException -> getString(R.string.error_invalid_response)
+    is PromptUnconfirmedException -> getString(R.string.delivery_unknown)
+    is PromptRejectedException -> getString(R.string.delivery_rejected)
+    is OutboxSaveException -> getString(R.string.delivery_save_failed)
+    is OutboxFullException -> getString(R.string.delivery_outbox_full)
     is AttachmentException -> attachmentMessage(error)
     is TimeoutCancellationException -> getString(R.string.error_timeout)
     is BridgeException -> when (error.code) {

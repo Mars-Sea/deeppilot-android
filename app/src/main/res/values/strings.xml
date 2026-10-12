@@ -295,4 +295,15 @@
     <string name="schedule_untitled">Untitled task</string>
     <string name="schedule_weekdays">Weekdays</string>
     <string name="schedule_weekly">Weekly</string>
+    <string name="delivery_acknowledge">Got it</string>
+    <string name="delivery_dismiss">Dismiss</string>
+    <string name="delivery_outbox_full">The pending-send queue on this device is full; try again later</string>
+    <string name="delivery_rejected">The host rejected this message</string>
+    <string name="delivery_save_failed">Couldn\'t record the pending send on this device, so the message was not sent</string>
+    <string name="delivery_unconfirmed_title">Send unconfirmed</string>
+    <string name="delivery_unknown">Couldn\'t confirm the host received it; check the conversation</string>
+    <plurals name="delivery_attachments">
+        <item quantity="one">%1$d attachment</item>
+        <item quantity="other">%1$d attachments</item>
+    </plurals>
 </resources>

@@ -33,6 +33,7 @@ object FrameType {
     const val SESSION_EVENT = "s2c.session.event"
     const val SESSION_SEND_PROMPT = "c2s.session.sendPrompt"
     const val SESSION_CANCEL = "c2s.session.cancel"
+    const val SESSION_DELIVERY = "c2s.session.delivery"
 
     const val PENDING_APPROVAL = "s2c.pending.approval"
     const val PENDING_QUESTION = "s2c.pending.question"
@@ -309,7 +310,22 @@ data class SendPrompt(
     val text: String,
     val images: List<PromptImage>? = null,
     val documents: List<PromptDocument>? = null,
+    /** Stable send identity when the bridge advertises `promptDelivery` (§10). */
+    val clientSendId: String? = null,
 )
+
+/** `s2c.ack` for a prompt sent with a clientSendId, and the `c2s.session.delivery` answer. */
+@Serializable
+data class PromptReceipt(
+    val clientSendId: String = "",
+    /** accepted | rejected | unknown | notFound | expired */
+    val status: String = "unknown",
+    val userSeq: Long? = null,
+    val code: String? = null,
+)
+
+@Serializable
+data class PromptDeliveryQuery(val sessionId: String, val clientSendId: String)
 
 // ---------- pending interactions ----------
 
