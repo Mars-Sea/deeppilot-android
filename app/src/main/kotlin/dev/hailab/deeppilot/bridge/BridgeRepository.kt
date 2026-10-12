@@ -15,6 +15,7 @@ import dev.hailab.deeppilot.core.protocol.ApprovalRespond
 import dev.hailab.deeppilot.core.protocol.ArchivedSessionsSnapshot
 import dev.hailab.deeppilot.core.protocol.AttachmentData
 import dev.hailab.deeppilot.core.protocol.AttachmentRequest
+import dev.hailab.deeppilot.core.protocol.ClientRequestId
 import dev.hailab.deeppilot.core.protocol.DirectoryListing
 import dev.hailab.deeppilot.core.protocol.DirectoryPicked
 import dev.hailab.deeppilot.core.protocol.DirectoryRequest
@@ -31,11 +32,24 @@ import dev.hailab.deeppilot.core.protocol.PendingQuestion
 import dev.hailab.deeppilot.core.protocol.PendingSnapshot
 import dev.hailab.deeppilot.core.protocol.QuestionAnswer
 import dev.hailab.deeppilot.core.protocol.QuestionRespond
+import dev.hailab.deeppilot.core.protocol.ScheduleCreate
+import dev.hailab.deeppilot.core.protocol.ScheduleDelete
+import dev.hailab.deeppilot.core.protocol.ScheduleExpected
+import dev.hailab.deeppilot.core.protocol.ScheduleHistory
+import dev.hailab.deeppilot.core.protocol.ScheduleHistoryPayload
+import dev.hailab.deeppilot.core.protocol.ScheduleHistoryRequest
+import dev.hailab.deeppilot.core.protocol.ScheduleListRequest
+import dev.hailab.deeppilot.core.protocol.ScheduleSnapshot
+import dev.hailab.deeppilot.core.protocol.ScheduleTask
+import dev.hailab.deeppilot.core.protocol.ScheduleUpdate
+import dev.hailab.deeppilot.core.protocol.ScheduleUpdated
 import dev.hailab.deeppilot.core.protocol.SelectModelRequest
 import dev.hailab.deeppilot.core.protocol.SendPrompt
 import dev.hailab.deeppilot.core.protocol.SessionCreate
 import dev.hailab.deeppilot.core.protocol.SessionCreated
 import dev.hailab.deeppilot.core.protocol.SessionEvent
+import dev.hailab.deeppilot.core.protocol.SessionFork
+import dev.hailab.deeppilot.core.protocol.SessionForked
 import dev.hailab.deeppilot.core.protocol.SessionModelSelected
 import dev.hailab.deeppilot.core.protocol.SessionModels
 import dev.hailab.deeppilot.core.protocol.SessionModelsRequest
@@ -108,6 +122,10 @@ class BridgeRepository(
     private val _openSession = MutableStateFlow<OpenSession?>(null)
     val openSession: StateFlow<OpenSession?> = _openSession.asStateFlow()
 
+    private val _schedules = MutableStateFlow<ScheduleState?>(null)
+    /** Automation tasks of the session whose task list was last requested. */
+    val schedules: StateFlow<ScheduleState?> = _schedules.asStateFlow()
+
     private val deduper = NotificationDeduper()
 
     fun start() {
@@ -168,6 +186,7 @@ class BridgeRepository(
         _approvals.value = emptyList()
         _questions.value = emptyList()
         _openSession.value = null
+        _schedules.value = null
         notifier.cancelAll()
         scope.launch { images.clear(credentials.profileId) }
     }
@@ -183,6 +202,7 @@ class BridgeRepository(
             if (_capabilities.value?.pendingSnapshot == true) client.send(FrameType.PENDING_LIST)
             _openSession.value?.let { client.send(FrameType.SESSION_OPEN, SessionOpen.serializer(), SessionOpen(it.sessionId, TAIL_COUNT)) }
         }
+        _schedules.value?.let { loadSchedules(it.sessionId) }
     }
 
     fun openSession(sessionId: String) {
@@ -352,6 +372,103 @@ class BridgeRepository(
         client.request(FrameType.SESSION_UNARCHIVE, SessionRef.serializer(), SessionRef(sessionId))
     }
 
+    // ---------- session fork and schedules (optional v2 extensions) ----------
+
+    /** Branches [sessionId] at the message boundary [atSeq]; returns the new session's id. */
+    suspend fun forkSession(sessionId: String, atSeq: Long?): String {
+        requireAuthenticated()
+        if (_capabilities.value?.sessionFork != true) throw UnsupportedFeatureException()
+        val reply = client.request(
+            FrameType.SESSION_FORK,
+            SessionFork.serializer(),
+            SessionFork(ClientRequestId.make(), sessionId, atSeq),
+            timeoutMillis = 30_000,
+        )
+        val forked = reply.decode(SessionForked.serializer())
+            ?.takeIf { it.sourceSessionId == sessionId && it.sessionId.isNotEmpty() }
+            ?: throw InvalidResponseException()
+        client.send(FrameType.SESSIONS_LIST)
+        return forked.sessionId
+    }
+
+    /** Reloads the automation tasks of [sessionId] into [schedules]. */
+    fun loadSchedules(sessionId: String) {
+        if (_capabilities.value?.schedules != true || connection.value !is ConnectionState.Authenticated) return
+        _schedules.update { current ->
+            if (current?.sessionId == sessionId) current.copy(loading = true, error = null) else ScheduleState(sessionId, loading = true)
+        }
+        scope.launch {
+            var tasks: List<ScheduleTask>? = null
+            val error = runCatching {
+                val reply = client.request(FrameType.SCHEDULE_LIST, ScheduleListRequest.serializer(), ScheduleListRequest(sessionId))
+                tasks = reply.decode(ScheduleSnapshot.serializer())?.takeIf { it.sessionId == sessionId }?.tasks
+                    ?: throw InvalidResponseException()
+            }.exceptionOrNull()
+            _schedules.update { current ->
+                if (current?.sessionId != sessionId) current
+                else current.copy(tasks = tasks ?: current.tasks, loading = false, error = error)
+            }
+        }
+    }
+
+    suspend fun loadScheduleHistory(sessionId: String, taskId: String): ScheduleHistory {
+        requireSchedules()
+        val reply = client.request(
+            FrameType.SCHEDULE_HISTORY,
+            ScheduleHistoryRequest.serializer(),
+            ScheduleHistoryRequest(sessionId, taskId),
+        )
+        return reply.decode(ScheduleHistoryPayload.serializer())
+            ?.takeIf { it.sessionId == sessionId && it.history.id == taskId }?.history
+            ?: throw InvalidResponseException()
+    }
+
+    /** Creates a task from [request]; its idempotency key and session are filled in here. */
+    suspend fun createSchedule(sessionId: String, request: ScheduleCreate) {
+        requireSchedules()
+        val body = request.copy(clientRequestId = ClientRequestId.make(), sessionId = sessionId)
+        val reply = client.request(FrameType.SCHEDULE_CREATE, ScheduleCreate.serializer(), body)
+        val task = reply.decode(ScheduleUpdated.serializer())
+            ?.takeIf { it.clientRequestId == body.clientRequestId && it.sessionId == sessionId }?.task
+            ?: throw InvalidResponseException()
+        replaceSchedule(sessionId, task)
+    }
+
+    /** Renames or rewords [task]; the host refuses the edit if [task] is stale. */
+    suspend fun updateSchedule(sessionId: String, task: ScheduleTask, title: String?, prompt: String?) {
+        requireSchedules()
+        val body = ScheduleUpdate(ClientRequestId.make(), sessionId, task.id, ScheduleExpected.of(task), title, prompt)
+        val reply = client.request(FrameType.SCHEDULE_UPDATE, ScheduleUpdate.serializer(), body)
+        val updated = reply.decode(ScheduleUpdated.serializer())
+            ?.takeIf { it.clientRequestId == body.clientRequestId && it.sessionId == sessionId }?.task
+            ?: throw InvalidResponseException()
+        replaceSchedule(sessionId, updated)
+    }
+
+    suspend fun deleteSchedule(sessionId: String, taskId: String) {
+        requireSchedules()
+        val body = ScheduleDelete(ClientRequestId.make(), sessionId, taskId)
+        val reply = client.request(FrameType.SCHEDULE_DELETE, ScheduleDelete.serializer(), body)
+        reply.decode(ScheduleUpdated.serializer())
+            ?.takeIf { it.clientRequestId == body.clientRequestId && it.sessionId == sessionId && it.deleted }
+            ?: throw InvalidResponseException()
+        _schedules.update { current ->
+            if (current?.sessionId != sessionId) current else current.copy(tasks = current.tasks.filterNot { it.id == taskId })
+        }
+    }
+
+    private fun replaceSchedule(sessionId: String, task: ScheduleTask) {
+        _schedules.update { current ->
+            if (current?.sessionId != sessionId) current
+            else current.copy(tasks = (current.tasks.filterNot { it.id == task.id } + task).sortedBy { it.scheduledAt })
+        }
+    }
+
+    private fun requireSchedules() {
+        requireAuthenticated()
+        if (_capabilities.value?.schedules != true) throw UnsupportedFeatureException()
+    }
+
     private fun requireAuthenticated() {
         if (connection.value !is ConnectionState.Authenticated) throw NotConnectedException()
     }
@@ -361,6 +478,15 @@ class BridgeRepository(
     private fun handle(envelope: Envelope) {
         when (envelope.type) {
             FrameType.RESYNC -> refresh()
+            FrameType.SCHEDULE_CHANGED -> _schedules.value?.let { loadSchedules(it.sessionId) }
+            FrameType.SESSION_RENAMED -> envelope.decode(SessionRenamed.serializer())?.let { renamed ->
+                val id = renamed.sessionId ?: return@let
+                val title = renamed.title ?: return@let
+                _sessions.update { list -> list.map { if (it.id == id) it.copy(title = title) else it } }
+            }
+            FrameType.SESSION_ARCHIVED -> envelope.decode(SessionRef.serializer())?.let { archived ->
+                _sessions.update { list -> list.filterNot { it.id == archived.sessionId } }
+            }
             FrameType.SESSIONS_SNAPSHOT -> envelope.decode(SessionsSnapshot.serializer())?.let { snapshot ->
                 _sessions.update { current ->
                     if (snapshot.full) SessionList.sorted(snapshot.sessions)
@@ -457,3 +583,11 @@ class BridgeRepository(
         const val TAIL_COUNT = 60
     }
 }
+
+/** Automation tasks of one session, as loaded by [BridgeRepository.loadSchedules]. */
+data class ScheduleState(
+    val sessionId: String,
+    val tasks: List<ScheduleTask> = emptyList(),
+    val loading: Boolean = false,
+    val error: Throwable? = null,
+)

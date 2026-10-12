@@ -1,5 +1,6 @@
 package dev.hailab.deeppilot.ui.components
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -9,6 +10,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,10 +23,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -39,19 +45,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.core.bridge.ConnectionState
@@ -61,6 +71,8 @@ import dev.hailab.deeppilot.ui.AppRadius
 import dev.hailab.deeppilot.ui.AppSpacing
 import dev.hailab.deeppilot.ui.AppType
 import dev.hailab.deeppilot.ui.palette
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /** Click without the Material ripple, like an iOS `.plain` button. */
 @Composable
@@ -317,3 +329,58 @@ fun IconLabel(
 
 /** Content padding helper matching iOS page insets. */
 val PageInsets = PaddingValues(horizontal = AppLayout.pageInset)
+
+/**
+ * iOS `.swipeActions(edge: .trailing)`: drag the row left to reveal [actions]
+ * (each [actionWidth] wide) behind it; a tap on an action closes the row again.
+ */
+@Composable
+fun SwipeActionsRow(
+    actions: List<SwipeAction>,
+    modifier: Modifier = Modifier,
+    actionWidth: Dp = 74.dp,
+    content: @Composable () -> Unit,
+) {
+    val density = LocalDensity.current
+    val revealPx = with(density) { (actionWidth * actions.size).toPx() }
+    val scope = rememberCoroutineScope()
+    val offset = remember { Animatable(0f) }
+    fun settle(open: Boolean) {
+        scope.launch { offset.animateTo(if (open) -revealPx else 0f, tween(200)) }
+    }
+    Box(modifier.fillMaxWidth().clipToBounds()) {
+        Row(Modifier.matchParentSize(), horizontalArrangement = Arrangement.End) {
+            actions.forEach { action ->
+                Box(
+                    Modifier
+                        .width(actionWidth)
+                        .fillMaxHeight()
+                        .background(action.color)
+                        .plainClickable {
+                            settle(false)
+                            action.onClick()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Icon(action.icon, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                        Text(action.label, style = AppType.caption.copy(fontWeight = FontWeight.Medium), color = Color.White, maxLines = 1)
+                    }
+                }
+            }
+        }
+        Box(
+            Modifier
+                .offset { IntOffset(offset.value.roundToInt(), 0) }
+                .draggable(
+                    state = rememberDraggableState { delta ->
+                        scope.launch { offset.snapTo((offset.value + delta).coerceIn(-revealPx, 0f)) }
+                    },
+                    orientation = Orientation.Horizontal,
+                    onDragStopped = { velocity -> settle(velocity < -600f || (velocity < 600f && offset.value < -revealPx / 2)) },
+                ),
+        ) { content() }
+    }
+}
+
+data class SwipeAction(val label: String, val icon: ImageVector, val color: Color, val onClick: () -> Unit)

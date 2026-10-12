@@ -34,10 +34,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,23 +58,23 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.core.content.ContextCompat
-import dev.hailab.deeppilot.attachments.AttachmentIngest
-import dev.hailab.deeppilot.attachments.CameraFiles
-import dev.hailab.deeppilot.core.attachments.PromptAttachment
-import dev.hailab.deeppilot.core.protocol.ModelSelection
-import dev.hailab.deeppilot.core.protocol.SessionModels
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.hailab.deeppilot.R
+import dev.hailab.deeppilot.attachments.AttachmentIngest
+import dev.hailab.deeppilot.attachments.CameraFiles
 import dev.hailab.deeppilot.bridge.BridgeRepository
+import dev.hailab.deeppilot.core.attachments.PromptAttachment
 import dev.hailab.deeppilot.core.bridge.ConnectionState
+import dev.hailab.deeppilot.core.protocol.ModelSelection
 import dev.hailab.deeppilot.core.protocol.PendingApproval
 import dev.hailab.deeppilot.core.protocol.PendingQuestion
+import dev.hailab.deeppilot.core.protocol.SessionModels
 import dev.hailab.deeppilot.core.session.Timeline
 import dev.hailab.deeppilot.ui.AppType
 import dev.hailab.deeppilot.ui.attempt
@@ -93,6 +94,7 @@ fun SessionScreen(
     sessionId: String,
     onBack: () -> Unit,
     onNewSession: () -> Unit,
+    onOpenSession: (String) -> Unit,
 ) {
     DisposableEffect(sessionId) {
         repository.openSession(sessionId)
@@ -122,6 +124,13 @@ fun SessionScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var showsTodos by remember { mutableStateOf(false) }
+    var showsSchedules by remember { mutableStateOf(false) }
+    val capabilities by repository.capabilities.collectAsStateWithLifecycle()
+    val supportsSchedules = capabilities?.schedules == true
+    val supportsFork = capabilities?.sessionFork == true
+    LaunchedEffect(sessionId, connected, supportsSchedules) {
+        if (connected && supportsSchedules) repository.loadSchedules(sessionId)
+    }
 
     // Pending approval/question half sheet, with a chip to bring back a dismissed one.
     var dismissed by remember(sessionId) { mutableStateOf(setOf<String>()) }
@@ -166,6 +175,14 @@ fun SessionScreen(
     var pendingAttachments by remember { mutableStateOf<List<PromptAttachment>>(emptyList()) }
     var importing by remember { mutableIntStateOf(0) }
     var alert by remember { mutableStateOf<Pair<String, String>?>(null) }
+
+    // Branch at an answer and open the new session; the button owns its spinner.
+    suspend fun fork(atSeq: Long) {
+        var newId: String? = null
+        val error = attempt { newId = repository.forkSession(sessionId, atSeq) }
+        if (error != null) alert = context.getString(R.string.schedule_fork_failed) to context.errorMessage(error)
+        else newId?.let(onOpenSession)
+    }
     val capabilityTitle = stringResource(R.string.composer_capability_title)
     val ingest = remember { AttachmentIngest(context.applicationContext) }
     var showsAttachmentSheet by remember { mutableStateOf(false) }
@@ -285,6 +302,9 @@ fun SessionScreen(
             leading = { BackButton(onBack) },
             trailing = {
                 BarIconButton(Icons.Outlined.AddComment, stringResource(R.string.a11y_new_session), onNewSession, enabled = connected)
+                if (supportsSchedules) {
+                    BarIconButton(Icons.Outlined.History, stringResource(R.string.schedule_title), { showsSchedules = true })
+                }
             },
             principal = { ConnectionStatusTitle(title, connection) { repository.reconnect() } },
         )
@@ -305,7 +325,9 @@ fun SessionScreen(
                         if (state?.loaded != true) ConversationSkeleton() else EmptyConversation()
                     }
                 }
-                items(rows, key = { it.key }) { row -> TimelineRow(row, sessionId, repository) { layoutTick++ } }
+                items(rows, key = { it.key }) { row ->
+                    TimelineRow(row, sessionId, repository, onFork = if (supportsFork) ::fork else null) { layoutTick++ }
+                }
                 pendingText?.let { text ->
                     item(key = "pending") {
                         TrailingBubble {
@@ -518,6 +540,10 @@ fun SessionScreen(
             text = { Text(message) },
             confirmButton = { TextButton(onClick = { alert = null }) { Text(stringResource(R.string.common_ok)) } },
         )
+    }
+
+    if (showsSchedules) {
+        ScheduleListSheet(repository = repository, sessionId = sessionId, onDismiss = { showsSchedules = false })
     }
 
     if (showsTodos) {

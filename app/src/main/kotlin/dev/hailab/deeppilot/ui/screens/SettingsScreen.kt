@@ -407,7 +407,7 @@ private fun <T> SegmentedControl(
 
 /** iOS `Menu` with the current value and an up/down chevron; the chosen item carries a check. */
 @Composable
-private fun <T> MenuPicker(options: List<T>, selected: T, label: @Composable (T) -> String, onSelect: (T) -> Unit) {
+internal fun <T> MenuPicker(options: List<T>, selected: T, label: @Composable (T) -> String, onSelect: (T) -> Unit) {
     val p = palette
     var open by remember { mutableStateOf(false) }
     Box {
@@ -447,7 +447,7 @@ private fun StatusText(text: String, color: Color) {
 }
 
 @Composable
-private fun Chevron() {
+internal fun Chevron() {
     Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = palette.tertiary, modifier = Modifier.size(18.dp))
 }
 

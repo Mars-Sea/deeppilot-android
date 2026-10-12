@@ -117,6 +117,7 @@ fun MainShell(
                         sessionId = id,
                         onBack = { nav.popBackStack() },
                         onNewSession = { creatingPicker = true },
+                        onOpenSession = ::openSession,
                     )
                 }
                 composable(SETTINGS) {
