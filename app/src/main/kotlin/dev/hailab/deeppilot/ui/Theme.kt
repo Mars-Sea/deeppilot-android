@@ -10,6 +10,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import dev.hailab.deeppilot.data.AppearanceOption
+import dev.hailab.deeppilot.data.FontSizeOption
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -46,6 +50,9 @@ data class AppPalette(
     val softAccent: Color get() = accent.copy(alpha = 0.10f)
     val mutedSurface: Color get() = foreground.copy(alpha = 0.05f)
     val hairline: Color get() = border.copy(alpha = 0.72f)
+
+    /** iOS `systemGroupedBackground`. */
+    val groupedBackground: Color get() = if (dark) Color.Black else Color(0xFFF2F2F7)
 
     companion object {
         val Light = AppPalette(
@@ -128,9 +135,25 @@ val LocalPalette = staticCompositionLocalOf { AppPalette.Light }
 val palette: AppPalette
     @Composable get() = LocalPalette.current
 
+/** Whether the app draws dark, after the user's appearance choice. */
 @Composable
-fun DeepPilotTheme(content: @Composable () -> Unit) {
-    val colors = if (isSystemInDarkTheme()) AppPalette.Dark else AppPalette.Light
+fun AppearanceOption.isDark(): Boolean = when (this) {
+    AppearanceOption.System -> isSystemInDarkTheme()
+    AppearanceOption.Light -> false
+    AppearanceOption.Dark -> true
+}
+
+@Composable
+fun DeepPilotTheme(
+    appearance: AppearanceOption = AppearanceOption.System,
+    fontSize: FontSizeOption = FontSizeOption.System,
+    content: @Composable () -> Unit,
+) {
+    val colors = if (appearance.isDark()) AppPalette.Dark else AppPalette.Light
+    // A fixed text size pins the font scale like iOS pins a Dynamic Type size;
+    // every sp (and the WebView text zoom) follows it.
+    val density = LocalDensity.current
+    val scaled = fontSize.scale?.let { Density(density.density, it) } ?: density
     val scheme = if (colors.dark) {
         darkColorScheme(
             primary = colors.accent,
@@ -177,7 +200,7 @@ fun DeepPilotTheme(content: @Composable () -> Unit) {
         labelMedium = AppType.caption,
         labelSmall = AppType.caption2,
     )
-    CompositionLocalProvider(LocalPalette provides colors) {
+    CompositionLocalProvider(LocalPalette provides colors, LocalDensity provides scaled) {
         MaterialTheme(colorScheme = scheme, typography = typography, content = content)
     }
 }

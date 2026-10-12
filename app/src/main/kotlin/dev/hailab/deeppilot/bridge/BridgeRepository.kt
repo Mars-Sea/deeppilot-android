@@ -6,7 +6,24 @@ import dev.hailab.deeppilot.core.bridge.HostCredentials
 import dev.hailab.deeppilot.core.bridge.NotConnectedException
 import dev.hailab.deeppilot.core.pairing.PairingClient
 import dev.hailab.deeppilot.core.pairing.PairingLink
+import android.graphics.Bitmap
+import dev.hailab.deeppilot.attachments.AttachmentImages
+import dev.hailab.deeppilot.core.attachments.PromptAttachment
+import dev.hailab.deeppilot.core.attachments.promptDocuments
+import dev.hailab.deeppilot.core.attachments.promptImages
 import dev.hailab.deeppilot.core.protocol.ApprovalRespond
+import dev.hailab.deeppilot.core.protocol.AttachmentData
+import dev.hailab.deeppilot.core.protocol.AttachmentRequest
+import dev.hailab.deeppilot.core.protocol.DirectoryListing
+import dev.hailab.deeppilot.core.protocol.DirectoryPicked
+import dev.hailab.deeppilot.core.protocol.DirectoryRequest
+import dev.hailab.deeppilot.core.protocol.ModelSelection
+import dev.hailab.deeppilot.core.protocol.SelectModelRequest
+import dev.hailab.deeppilot.core.protocol.SessionModelSelected
+import dev.hailab.deeppilot.core.protocol.SessionModels
+import dev.hailab.deeppilot.core.protocol.SessionModelsRequest
+import dev.hailab.deeppilot.core.protocol.WorkspaceCreate
+import dev.hailab.deeppilot.core.protocol.WorkspaceCreated
 import dev.hailab.deeppilot.core.protocol.Envelope
 import dev.hailab.deeppilot.core.protocol.FrameType
 import dev.hailab.deeppilot.core.protocol.HistoryPage
@@ -67,6 +84,7 @@ class BridgeRepository(
     private val identity: DeviceIdentity,
     private val appVersion: String,
     private val scope: CoroutineScope,
+    private val images: AttachmentImages,
 ) {
     val connection: StateFlow<ConnectionState> = client.state
 
@@ -149,6 +167,7 @@ class BridgeRepository(
         _questions.value = emptyList()
         _openSession.value = null
         notifier.cancelAll()
+        scope.launch { images.clear(credentials.profileId) }
     }
 
     fun reconnect() = client.forceReconnect()
@@ -197,9 +216,73 @@ class BridgeRepository(
 
     // ---------- writes (throw on failure so the screen can say so) ----------
 
-    suspend fun sendPrompt(sessionId: String, text: String) {
+    suspend fun sendPrompt(sessionId: String, text: String, attachments: List<PromptAttachment> = emptyList()) {
         requireAuthenticated()
-        client.request(FrameType.SESSION_SEND_PROMPT, SendPrompt.serializer(), SendPrompt(sessionId, text))
+        client.request(
+            FrameType.SESSION_SEND_PROMPT,
+            SendPrompt.serializer(),
+            SendPrompt(sessionId, text, images = attachments.promptImages(), documents = attachments.promptDocuments()),
+            timeoutMillis = PromptAttachment.sendTimeoutMillis(attachments),
+        )
+    }
+
+    /** The host's model catalog for [sessionId] (§4); never built into the app. */
+    suspend fun loadModels(sessionId: String): SessionModels {
+        requireAuthenticated()
+        if (_capabilities.value?.models != true) throw UnsupportedFeatureException()
+        val reply = client.request(FrameType.SESSION_MODELS, SessionModelsRequest.serializer(), SessionModelsRequest(sessionId))
+        return reply.decode(SessionModels.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+    }
+
+    /** Switches the session's route; returns what the host applied. */
+    suspend fun selectModel(sessionId: String, selection: ModelSelection): ModelSelection {
+        requireAuthenticated()
+        if (_capabilities.value?.models != true) throw UnsupportedFeatureException()
+        val reply = client.request(
+            FrameType.SESSION_SELECT_MODEL,
+            SelectModelRequest.serializer(),
+            SelectModelRequest(sessionId, selection.provider, selection.model, selection.reasoningEffort?.takeIf { it.isNotEmpty() }),
+        )
+        return reply.decode(SessionModelSelected.serializer())?.takeIf { it.sessionId == sessionId }?.selected
+            ?: throw InvalidResponseException()
+    }
+
+    /** One persisted conversation image, from the cache or read back from the host (§5). */
+    suspend fun attachmentImage(sessionId: String, attachmentId: String): Bitmap? {
+        val profileId = _host.value?.profileId ?: return null
+        return images.image(profileId, sessionId, attachmentId) {
+            if (connection.value !is ConnectionState.Authenticated) return@image null
+            val reply = client.request(
+                FrameType.SESSION_ATTACHMENT,
+                AttachmentRequest.serializer(),
+                AttachmentRequest(sessionId, attachmentId),
+                timeoutMillis = 30_000,
+            )
+            reply.decode(AttachmentData.serializer())?.data?.takeIf { it.isNotEmpty() }
+        }
+    }
+
+    /** A folder listing on the host; [path] null starts at the host user's home (§4b). */
+    suspend fun listDirectory(path: String?): DirectoryListing {
+        requireAuthenticated()
+        val reply = client.request(FrameType.DIRECTORY_LIST, DirectoryRequest.serializer(), DirectoryRequest(path?.takeIf { it.isNotEmpty() }))
+        return reply.decode(DirectoryListing.serializer()) ?: throw InvalidResponseException()
+    }
+
+    /** Opens the folder picker on the computer; null when the user cancels there. */
+    suspend fun pickDirectoryOnComputer(): String? {
+        requireAuthenticated()
+        // Someone has to walk to the computer and choose, so allow minutes, not seconds.
+        val reply = client.request(FrameType.DIRECTORY_PICK, timeoutMillis = 5 * 60_000)
+        return (reply.decode(DirectoryPicked.serializer()) ?: throw InvalidResponseException()).path
+    }
+
+    /** Adopts a host folder as a project; adopting the same path twice returns the existing one. */
+    suspend fun createWorkspace(path: String): Workspace {
+        requireAuthenticated()
+        if (_capabilities.value?.projectSelection != true) throw UnsupportedFeatureException()
+        val reply = client.request(FrameType.WORKSPACE_CREATE, WorkspaceCreate.serializer(), WorkspaceCreate(path))
+        return reply.decode(WorkspaceCreated.serializer())?.workspace ?: throw InvalidResponseException()
     }
 
     suspend fun cancelTurn(sessionId: String) {

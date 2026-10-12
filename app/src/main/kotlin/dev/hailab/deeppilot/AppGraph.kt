@@ -1,7 +1,9 @@
 package dev.hailab.deeppilot
 
 import android.app.Application
+import dev.hailab.deeppilot.attachments.AttachmentImages
 import dev.hailab.deeppilot.bridge.AppVisibility
+import dev.hailab.deeppilot.data.AppPreferences
 import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.bridge.BridgeClient
 import dev.hailab.deeppilot.data.DeviceIdentity
@@ -43,7 +45,9 @@ class AppGraph(private val app: Application) {
         identity = identity,
         appVersion = BuildConfig.VERSION_NAME,
         scope = scope,
+        images = AttachmentImages(app.cacheDir),
     )
+    val preferences = AppPreferences(app)
 
     fun start() {
         notifier.createChannels()

@@ -1,16 +1,26 @@
 package dev.hailab.deeppilot.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Color
+import android.os.LocaleList
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.hailab.deeppilot.data.AppPreferences
 import androidx.core.content.ContextCompat
 import dev.hailab.deeppilot.core.pairing.PairingLink
 import dev.hailab.deeppilot.graph
@@ -26,12 +36,36 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    /** The in-app language choice overrides the system locale for this activity's resources. */
+    override fun attachBaseContext(newBase: Context) {
+        val locale = AppPreferences.storedLanguage(newBase).locale
+        if (locale == null) {
+            super.attachBaseContext(newBase)
+            return
+        }
+        val config = Configuration(newBase.resources.configuration).apply { setLocales(LocaleList(locale)) }
+        super.attachBaseContext(newBase.createConfigurationContext(config))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         if (savedInstanceState == null) handleIntent(intent)
+        val preferences = graph.preferences
         setContent {
-            DeepPilotTheme {
+            val appearance by preferences.appearance.collectAsStateWithLifecycle()
+            val fontSize by preferences.fontSize.collectAsStateWithLifecycle()
+            val language by preferences.language.collectAsStateWithLifecycle()
+            val dark = appearance.isDark()
+            // Status and navigation bar icons follow the app's appearance, not only the system's.
+            LaunchedEffect(dark) {
+                val style = if (dark) SystemBarStyle.dark(Color.TRANSPARENT) else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+            }
+            // Strings come from the activity's resources, so a new language needs a fresh activity.
+            val applied = remember { language }
+            LaunchedEffect(language) { if (language != applied) recreate() }
+            DeepPilotTheme(appearance = appearance, fontSize = fontSize) {
                 AppRoot(
                     repository = graph.repository,
                     pairLink = pairLink,

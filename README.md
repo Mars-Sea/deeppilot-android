@@ -32,6 +32,7 @@ DeepPilot 是 [DeepSeek Harness（DSH）](https://www.npmjs.com/package/dsh-deep
 
 - [KaTeX](https://github.com/KaTeX/KaTeX) 0.18.7（MIT）和 [marked](https://github.com/markedjs/marked) 18.0.13（MIT），放在 `app/src/main/assets/markdown/`，许可证随文件附带。
 - [ZXing Android Embedded](https://github.com/journeyapps/zxing-android-embedded)（Apache-2.0），用于扫码。
+- [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT）的单色模型品牌图标，与 iOS 版相同，转成矢量图放在 `app/src/main/res/drawable/model_icon_*.xml`。
 
 ## 许可证
 

@@ -5,6 +5,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import dev.hailab.deeppilot.R
+import dev.hailab.deeppilot.attachments.AttachmentException
+import dev.hailab.deeppilot.bridge.InvalidResponseException
+import dev.hailab.deeppilot.bridge.UnsupportedFeatureException
 import dev.hailab.deeppilot.core.bridge.BridgeException
 import dev.hailab.deeppilot.core.bridge.ConnectionState
 import dev.hailab.deeppilot.core.bridge.FailureReason
@@ -58,6 +61,9 @@ fun Context.errorMessage(error: Throwable): String = when (error) {
     is PairingFailure.HttpStatus -> getString(R.string.pair_error_http, error.status)
     is PairingFailure -> getString(R.string.pair_error_generic)
     is NotConnectedException -> getString(R.string.error_not_connected)
+    is UnsupportedFeatureException -> getString(R.string.error_unsupported)
+    is InvalidResponseException -> getString(R.string.error_invalid_response)
+    is AttachmentException -> attachmentMessage(error)
     is TimeoutCancellationException -> getString(R.string.error_timeout)
     is BridgeException -> when (error.code) {
         WireErrorCode.E_BUSY -> getString(R.string.error_busy)
@@ -70,3 +76,13 @@ fun Context.errorMessage(error: Throwable): String = when (error) {
 
 @Composable
 fun errorText(error: Throwable): String = LocalContext.current.errorMessage(error)
+
+fun Context.attachmentMessage(error: AttachmentException): String = when (error.reason) {
+    AttachmentException.Reason.ImageUnreadable, AttachmentException.Reason.ImageOversized ->
+        getString(R.string.composer_image_failed)
+    AttachmentException.Reason.DocumentUnsupported -> getString(R.string.composer_document_unsupported)
+    AttachmentException.Reason.DocumentUnreadable -> getString(R.string.composer_document_unreadable)
+    AttachmentException.Reason.DocumentOversized -> getString(R.string.composer_document_oversized)
+    AttachmentException.Reason.ReadFailed -> getString(R.string.composer_file_read_failed, error.detail.orEmpty())
+    AttachmentException.Reason.TooMany -> getString(R.string.composer_attachments_max)
+}

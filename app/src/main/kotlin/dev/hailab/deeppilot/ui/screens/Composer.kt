@@ -16,7 +16,35 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import dev.hailab.deeppilot.core.attachments.PromptAttachment
+import dev.hailab.deeppilot.core.protocol.ModelReasoning
+import dev.hailab.deeppilot.core.protocol.ModelReasoningEffort
+import dev.hailab.deeppilot.core.protocol.SessionModels
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -54,14 +82,24 @@ import dev.hailab.deeppilot.ui.palette
 
 /**
  * iOS `PromptComposer`: a floating rounded box. Idle it is one 52dp row with
- * the send disc at the end; once focused or holding text the field takes the
- * whole width and the send disc moves to a footer row below it.
+ * the attach and send buttons at the end; once focused or holding a draft the
+ * field takes the whole width and a footer row below carries the model and
+ * thinking selectors, the attach button and the send disc.
  */
 @Composable
 fun PromptComposer(
     draft: String,
     onDraftChange: (String) -> Unit,
+    attachments: List<PromptAttachment>,
+    onRemoveAttachment: (PromptAttachment) -> Unit,
+    onAddAttachment: () -> Unit,
     todoItems: List<TodoItem>,
+    models: SessionModels?,
+    modelsLoading: Boolean,
+    modelsError: String?,
+    onOpenModels: () -> Unit,
+    onSelectEffort: (ModelReasoningEffort) -> Unit,
+    changingEffort: Boolean,
     canSubmit: Boolean,
     sending: Boolean,
     running: Boolean,
@@ -69,69 +107,270 @@ fun PromptComposer(
     onSend: () -> Unit,
     onStop: () -> Unit,
     onOpenTodos: () -> Unit,
+    focusRequester: FocusRequester,
     modifier: Modifier = Modifier,
 ) {
     val p = palette
     var focused by remember { mutableStateOf(false) }
-    val expanded = focused || draft.isNotEmpty()
+    val expanded = focused || draft.isNotEmpty() || attachments.isNotEmpty()
     val shape = RoundedCornerShape(AppRadius.large)
+    val working = sending || running || stopping
 
-    Column(
-        modifier
-            .fillMaxWidth()
-            .background(if (p.dark) p.surface else p.background, shape)
-            .border(0.5.dp, p.hairline, shape),
-    ) {
-        if (todoItems.isNotEmpty()) {
-            TodoComposerStatus(todoItems, onOpenTodos, Modifier.padding(horizontal = AppSpacing.regular))
-            Box(Modifier.padding(horizontal = AppSpacing.regular).fillMaxWidth().height(0.5.dp).background(p.hairline))
-        }
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (attachments.isNotEmpty()) AttachmentChips(attachments, onRemoveAttachment)
+
         Column(
             Modifier
                 .fillMaxWidth()
-                .heightIn(min = if (expanded) 0.dp else 52.dp)
-                .padding(horizontal = AppSpacing.regular, vertical = AppSpacing.small),
-            verticalArrangement = Arrangement.spacedBy(if (expanded) 8.dp else 0.dp),
+                .background(if (p.dark) p.surface else p.background, shape)
+                .border(0.5.dp, p.hairline, shape),
         ) {
-            val send = @Composable {
-                SendButton(
-                    canSend = draft.isNotBlank() && canSubmit,
-                    sending = sending,
-                    running = running,
-                    stopping = stopping,
-                    onSend = onSend,
-                    onStop = onStop,
-                )
+            if (todoItems.isNotEmpty()) {
+                TodoComposerStatus(todoItems, onOpenTodos, Modifier.padding(horizontal = AppSpacing.regular))
+                Box(Modifier.padding(horizontal = AppSpacing.regular).fillMaxWidth().height(0.5.dp).background(p.hairline))
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                BasicTextField(
-                    value = draft,
-                    onValueChange = onDraftChange,
-                    textStyle = AppType.body.copy(color = p.foreground),
-                    cursorBrush = SolidColor(p.accent),
-                    maxLines = 8,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(vertical = if (expanded) 4.dp else 0.dp)
-                        .onFocusChanged { focused = it.isFocused },
-                    decorationBox = { inner ->
-                        Box(contentAlignment = Alignment.CenterStart) {
-                            if (draft.isEmpty()) {
-                                Text(stringResource(R.string.composer_placeholder), style = AppType.body, color = p.tertiary)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = if (expanded) 0.dp else 52.dp)
+                    .padding(horizontal = AppSpacing.regular, vertical = AppSpacing.small),
+                verticalArrangement = Arrangement.spacedBy(if (expanded) 8.dp else 0.dp),
+            ) {
+                val send = @Composable {
+                    SendButton(
+                        canSend = (draft.isNotBlank() || attachments.isNotEmpty()) && canSubmit,
+                        sending = sending,
+                        running = running,
+                        stopping = stopping,
+                        onSend = onSend,
+                        onStop = onStop,
+                    )
+                }
+                val attach = @Composable { AttachButton(onAddAttachment) }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = onDraftChange,
+                        textStyle = AppType.body.copy(color = p.foreground),
+                        cursorBrush = SolidColor(p.accent),
+                        maxLines = 8,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(vertical = if (expanded) 4.dp else 0.dp)
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focused = it.isFocused },
+                        decorationBox = { inner ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (draft.isEmpty()) {
+                                    Text(stringResource(R.string.composer_placeholder), style = AppType.body, color = p.tertiary)
+                                }
+                                inner()
                             }
-                            inner()
+                        },
+                    )
+                    if (!expanded) {
+                        attach()
+                        send()
+                    }
+                }
+                if (expanded) {
+                    Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ModelButton(models, modelsLoading, modelsError, onOpenModels)
+                        val reasoning = models?.model()?.reasoning
+                        if (models != null && reasoning != null && reasoning.efforts.isNotEmpty()) {
+                            EffortButton(models, reasoning, changingEffort, enabled = !changingEffort && !working, onSelectEffort)
                         }
-                    },
-                )
-                if (!expanded) send()
-            }
-            if (expanded) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Spacer(Modifier.weight(1f))
-                    send()
+                        Spacer(Modifier.weight(1f).widthIn(min = 4.dp))
+                        attach()
+                        send()
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AttachButton(onClick: () -> Unit) {
+    Box(
+        Modifier.size(44.dp).plainClickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Filled.Add, stringResource(R.string.attachment_add), tint = palette.foreground, modifier = Modifier.size(24.dp))
+    }
+}
+
+/** Borderless model selector, fixed width so the controls after it never move. */
+@Composable
+private fun ModelButton(models: SessionModels?, loading: Boolean, error: String?, onClick: () -> Unit) {
+    val p = palette
+    val title = models?.displayName() ?: stringResource(R.string.model_fallback_title)
+    val color = if (error != null && models == null) p.danger else p.foreground
+    val label = stringResource(R.string.model_current_a11y, title)
+    Row(
+        Modifier
+            .width(ModelButtonWidth)
+            .height(32.dp)
+            .semantics { contentDescription = label }
+            .plainClickable(onClick = onClick)
+            .padding(end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        ModelButtonIcon(models, loading, color)
+        Text(
+            title,
+            style = AppType.subheadline.copy(fontWeight = FontWeight.Medium),
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Icon(Icons.Filled.KeyboardArrowDown, null, tint = p.tertiary, modifier = Modifier.size(14.dp))
+    }
+}
+
+/** Thinking intensity menu for the current model (iOS `reasoningEffortButton`). */
+@Composable
+private fun EffortButton(
+    models: SessionModels,
+    reasoning: ModelReasoning,
+    changing: Boolean,
+    enabled: Boolean,
+    onSelect: (ModelReasoningEffort) -> Unit,
+) {
+    val p = palette
+    var open by remember { mutableStateOf(false) }
+    val activeId = models.current.reasoningEffort ?: reasoning.defaultEffort
+    val activeName = reasoning.efforts.firstOrNull { it.id == activeId }?.name ?: activeId ?: stringResource(R.string.thinking_default)
+    val label = stringResource(R.string.thinking_current_a11y, activeName)
+    Box {
+        Row(
+            Modifier
+                .heightIn(min = 32.dp)
+                .semantics { contentDescription = label }
+                .plainClickable(enabled = enabled) { open = true }
+                .padding(end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (changing) SmallSpinner(size = 12.dp)
+            Text(
+                activeName,
+                style = AppType.footnote.copy(fontWeight = FontWeight.Medium),
+                color = if (enabled || changing) p.foreground else p.tertiary,
+                maxLines = 1,
+            )
+            Icon(Icons.Filled.KeyboardArrowDown, null, tint = p.tertiary, modifier = Modifier.size(14.dp))
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }, containerColor = p.surface) {
+            reasoning.efforts.forEach { effort ->
+                DropdownMenuItem(
+                    text = { Text(effort.name, style = AppType.body, color = p.foreground) },
+                    leadingIcon = {
+                        Box(Modifier.size(18.dp)) {
+                            if (effort.id == activeId) Icon(Icons.Filled.Check, null, tint = p.foreground, modifier = Modifier.size(18.dp))
+                        }
+                    },
+                    onClick = {
+                        open = false
+                        onSelect(effort)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** Pending attachments above the box: capsules with an icon, the name and a remove button. */
+@Composable
+private fun AttachmentChips(attachments: List<PromptAttachment>, onRemove: (PromptAttachment) -> Unit) {
+    val p = palette
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(attachments, key = { it.id }) { attachment ->
+            Row(
+                Modifier
+                    .clip(CircleShape)
+                    .background(p.surface)
+                    .border(1.dp, p.hairline, CircleShape)
+                    .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Icon(
+                    if (attachment.kind == PromptAttachment.Kind.Image) Icons.Outlined.Image else Icons.Outlined.Description,
+                    null,
+                    tint = p.foreground,
+                    modifier = Modifier.size(14.dp),
+                )
+                Text(
+                    attachment.name,
+                    style = AppType.caption,
+                    color = p.foreground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 180.dp),
+                )
+                Icon(
+                    Icons.Filled.Cancel,
+                    stringResource(R.string.attachment_remove_a11y, attachment.name),
+                    tint = p.secondary,
+                    modifier = Modifier.size(16.dp).plainClickable { onRemove(attachment) },
+                )
+            }
+        }
+    }
+}
+
+/** iOS `AttachmentPickerSheet`: camera, photos and files tiles with the limits hint. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AttachmentPickerSheet(onCamera: () -> Unit, onPhotos: () -> Unit, onFiles: () -> Unit, onDismiss: () -> Unit) {
+    val p = palette
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = p.background,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(stringResource(R.string.attachment_add), style = AppType.headline, color = p.foreground)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AttachmentTile(stringResource(R.string.attachment_camera), Icons.Outlined.PhotoCamera, onCamera, Modifier.weight(1f))
+                AttachmentTile(stringResource(R.string.attachment_photos), Icons.Outlined.PhotoLibrary, onPhotos, Modifier.weight(1f))
+                AttachmentTile(stringResource(R.string.attachment_files), Icons.Outlined.Folder, onFiles, Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(Icons.Outlined.Info, null, tint = p.secondary, modifier = Modifier.padding(top = 1.dp).size(15.dp))
+                Text(stringResource(R.string.attachments_hint), style = AppType.footnote, color = p.secondary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentTile(title: String, icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val p = palette
+    Column(
+        modifier
+            .heightIn(min = 82.dp)
+            .clip(RoundedCornerShape(AppRadius.large))
+            .background(p.surface)
+            .plainClickable(onClick = onClick)
+            .padding(vertical = 14.dp, horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+    ) {
+        Icon(icon, null, tint = p.foreground, modifier = Modifier.size(26.dp))
+        Text(
+            title,
+            style = AppType.footnote.copy(fontWeight = FontWeight.Medium),
+            color = p.foreground,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

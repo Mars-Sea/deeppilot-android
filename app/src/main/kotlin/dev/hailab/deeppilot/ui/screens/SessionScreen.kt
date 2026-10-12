@@ -1,5 +1,11 @@
 package dev.hailab.deeppilot.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -28,7 +34,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -36,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -44,7 +53,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.core.content.ContextCompat
+import dev.hailab.deeppilot.attachments.AttachmentIngest
+import dev.hailab.deeppilot.attachments.CameraFiles
+import dev.hailab.deeppilot.core.attachments.PromptAttachment
+import dev.hailab.deeppilot.core.protocol.ModelSelection
+import dev.hailab.deeppilot.core.protocol.SessionModels
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -66,6 +84,7 @@ import dev.hailab.deeppilot.ui.components.SmallSpinner
 import dev.hailab.deeppilot.ui.components.plainClickable
 import dev.hailab.deeppilot.ui.errorMessage
 import dev.hailab.deeppilot.ui.palette
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -97,6 +116,7 @@ fun SessionScreen(
 
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     var draft by rememberSaveable(sessionId) { mutableStateOf("") }
     var pendingText by remember { mutableStateOf<String?>(null) }
     var sendError by remember { mutableStateOf<String?>(null) }
@@ -141,19 +161,122 @@ fun SessionScreen(
         }
     }
 
+    // Attachments waiting to be sent, plus imports still being prepared.
+    val attachments = remember(sessionId) { mutableStateListOf<PromptAttachment>() }
+    var pendingAttachments by remember { mutableStateOf<List<PromptAttachment>>(emptyList()) }
+    var importing by remember { mutableIntStateOf(0) }
+    var alert by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val capabilityTitle = stringResource(R.string.composer_capability_title)
+    val ingest = remember { AttachmentIngest(context.applicationContext) }
+    var showsAttachmentSheet by remember { mutableStateOf(false) }
+
+    fun addAttachment(block: suspend () -> PromptAttachment) {
+        if (attachments.size + importing >= PromptAttachment.MAX_PER_PROMPT) {
+            alert = capabilityTitle to context.getString(R.string.composer_attachments_max)
+            return
+        }
+        importing++
+        scope.launch {
+            try {
+                var imported: PromptAttachment? = null
+                attempt { imported = block() }?.let { alert = capabilityTitle to context.errorMessage(it) }
+                imported?.let { if (attachments.size < PromptAttachment.MAX_PER_PROMPT) attachments += it }
+            } finally {
+                importing--
+            }
+        }
+    }
+    val photoName = { index: Int -> context.getString(R.string.attachment_photo_name, index) }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(PromptAttachment.MAX_PER_PROMPT)) { uris ->
+        val first = attachments.size + importing + 1
+        uris.forEachIndexed { index, uri ->
+            val name = photoName(first + index)
+            addAttachment { ingest.image(uri, name) }
+        }
+    }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        uris.forEach { uri -> addAttachment { ingest.file(uri) } }
+    }
+    var cameraTarget by rememberSaveable { mutableStateOf<Uri?>(null) }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        val uri = cameraTarget
+        if (saved && uri != null) {
+            val name = context.getString(R.string.attachment_camera_name, attachments.size + importing + 1)
+            addAttachment { ingest.image(uri, name) }
+        }
+    }
+    fun launchCamera() {
+        val uri = CameraFiles.newPhoto(context)
+        cameraTarget = uri
+        runCatching { camera.launch(uri) }.onFailure {
+            alert = capabilityTitle to context.getString(R.string.composer_camera_unavailable)
+        }
+    }
+    // The QR scanner declares CAMERA, so the system camera app needs the grant too.
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) launchCamera() else alert = capabilityTitle to context.getString(R.string.composer_camera_unavailable)
+    }
+
+    // Model catalog for this session (§4), loaded once connected and supported.
+    val capabilities by repository.capabilities.collectAsStateWithLifecycle()
+    var models by remember(sessionId) { mutableStateOf<SessionModels?>(null) }
+    var modelsLoading by remember { mutableStateOf(false) }
+    var modelsError by remember { mutableStateOf<String?>(null) }
+    var showsModelSheet by remember { mutableStateOf(false) }
+    var changingEffort by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun loadModels() {
+        if (modelsLoading) return
+        if (capabilities?.models != true) {
+            modelsError = context.getString(R.string.model_switch_unavailable)
+            return
+        }
+        modelsLoading = true
+        scope.launch {
+            var loaded: SessionModels? = null
+            val error = attempt { loaded = repository.loadModels(sessionId) }
+            if (error == null) {
+                models = loaded
+                modelsError = null
+            } else {
+                modelsError = context.errorMessage(error)
+            }
+            modelsLoading = false
+        }
+    }
+    suspend fun selectModel(selection: ModelSelection) {
+        val selected = repository.selectModel(sessionId, selection)
+        models = models?.copy(current = selected)
+        modelsError = null
+    }
+    LaunchedEffect(sessionId, connected, capabilities?.models) {
+        if (connected && capabilities?.models == true) loadModels()
+    }
+
     fun send() {
         val text = draft.trim()
-        if (text.isEmpty() || pendingText != null) return
+        val outgoing = attachments.toList()
+        if ((text.isEmpty() && outgoing.isEmpty()) || pendingText != null) return
         pendingText = text
+        pendingAttachments = outgoing
         draft = ""
+        attachments.clear()
         stickToBottom = true
         scope.launch {
-            val error = attempt { repository.sendPrompt(sessionId, text) }
+            val error = attempt { repository.sendPrompt(sessionId, text, outgoing) }
             if (error != null) {
-                draft = text
+                // Put the draft back unless something new was typed meanwhile.
+                if (draft.isBlank() && attachments.isEmpty()) {
+                    draft = text
+                    attachments += outgoing
+                }
                 sendError = context.errorMessage(error)
+            } else {
+                keyboard?.hide()
             }
             pendingText = null
+            pendingAttachments = emptyList()
         }
     }
 
@@ -182,11 +305,11 @@ fun SessionScreen(
                         if (state?.loaded != true) ConversationSkeleton() else EmptyConversation()
                     }
                 }
-                items(rows, key = { it.key }) { row -> TimelineRow(row) { layoutTick++ } }
+                items(rows, key = { it.key }) { row -> TimelineRow(row, sessionId, repository) { layoutTick++ } }
                 pendingText?.let { text ->
                     item(key = "pending") {
                         TrailingBubble {
-                            UserBubble(text, null) {
+                            UserBubble(text.ifEmpty { null }, pendingAttachments.map { it.asMessageAttachment() }, sessionId, repository) {
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     SmallSpinner(size = 11.dp)
                                     Text(stringResource(R.string.conversation_sending), style = AppType.caption, color = p.secondary)
@@ -264,6 +387,30 @@ fun SessionScreen(
                     draft = it
                     sendError = null
                 },
+                attachments = attachments,
+                onRemoveAttachment = { attachments.remove(it) },
+                onAddAttachment = { showsAttachmentSheet = true },
+                models = models,
+                modelsLoading = modelsLoading,
+                modelsError = modelsError,
+                onOpenModels = {
+                    focusManager.clearFocus()
+                    showsModelSheet = true
+                },
+                onSelectEffort = { effort ->
+                    val current = models
+                    if (current != null && effort.id != current.current.reasoningEffort && !changingEffort) {
+                        changingEffort = true
+                        scope.launch {
+                            attempt { selectModel(current.current.copy(reasoningEffort = effort.id)) }?.let {
+                                alert = capabilityTitle to context.getString(R.string.thinking_unsupported)
+                            }
+                            changingEffort = false
+                        }
+                    }
+                },
+                changingEffort = changingEffort,
+                focusRequester = focusRequester,
                 todoItems = summary?.todoItems.orEmpty(),
                 canSubmit = connected,
                 sending = pendingText != null,
@@ -320,6 +467,57 @@ fun SessionScreen(
                 onDismiss = { dismissed = dismissed + id },
             )
         }
+    }
+
+    if (showsAttachmentSheet) {
+        AttachmentPickerSheet(
+            onCamera = {
+                showsAttachmentSheet = false
+                if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+                    alert = capabilityTitle to context.getString(R.string.composer_camera_unavailable)
+                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    launchCamera()
+                } else {
+                    cameraPermission.launch(Manifest.permission.CAMERA)
+                }
+            },
+            onPhotos = {
+                showsAttachmentSheet = false
+                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onFiles = {
+                showsAttachmentSheet = false
+                filePicker.launch(arrayOf("*/*"))
+            },
+            onDismiss = { showsAttachmentSheet = false },
+        )
+    }
+
+    if (showsModelSheet) {
+        ModelPickerSheet(
+            catalog = models,
+            loading = modelsLoading,
+            loadError = modelsError,
+            onRefresh = ::loadModels,
+            onSelect = { selectModel(it) },
+            onDismiss = {
+                showsModelSheet = false
+                // Picking a model flows straight back into typing.
+                scope.launch {
+                    delay(300)
+                    if (!showsModelSheet) runCatching { focusRequester.requestFocus() }
+                }
+            },
+        )
+    }
+
+    alert?.let { (title, message) ->
+        AlertDialog(
+            onDismissRequest = { alert = null },
+            title = { Text(title) },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { alert = null }) { Text(stringResource(R.string.common_ok)) } },
+        )
     }
 
     if (showsTodos) {

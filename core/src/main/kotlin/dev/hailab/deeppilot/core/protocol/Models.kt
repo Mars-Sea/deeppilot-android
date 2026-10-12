@@ -49,6 +49,13 @@ object FrameType {
     const val SESSION_CREATE = "c2s.session.create"
     const val SESSION_RENAME = "c2s.session.rename"
     const val SESSION_ARCHIVE = "c2s.session.archive"
+
+    const val SESSION_MODELS = "c2s.session.models"
+    const val SESSION_SELECT_MODEL = "c2s.session.selectModel"
+    const val SESSION_ATTACHMENT = "c2s.session.attachment"
+    const val DIRECTORY_LIST = "c2s.directory.list"
+    const val DIRECTORY_PICK = "c2s.directory.pick"
+    const val WORKSPACE_CREATE = "c2s.workspace.create"
 }
 
 /** Device scopes requested at pairing; the product grants all of them (§2.2). */
@@ -194,8 +201,8 @@ data class MessageAttachment(
     val name: String? = null,
     val mediaType: String? = null,
     val attachmentId: String? = null,
-    val width: Int? = null,
-    val height: Int? = null,
+    val width: Double? = null,
+    val height: Double? = null,
     val truncated: Boolean? = null,
 )
 
@@ -392,3 +399,91 @@ data class SessionRename(val sessionId: String, val title: String)
 
 @Serializable
 data class SessionRenamed(val sessionId: String? = null, val title: String? = null)
+
+// ---------- models (§4 会话模型目录与切换) ----------
+
+@Serializable
+data class ModelSelection(val provider: String, val model: String, val reasoningEffort: String? = null)
+
+@Serializable
+data class SessionModelsRequest(val sessionId: String)
+
+@Serializable
+data class SelectModelRequest(
+    val sessionId: String,
+    val provider: String,
+    val model: String,
+    val reasoningEffort: String? = null,
+)
+
+@Serializable
+data class ModelReasoningEffort(val id: String, val name: String, val description: String? = null)
+
+@Serializable
+data class ModelReasoning(val efforts: List<ModelReasoningEffort> = emptyList(), val defaultEffort: String? = null)
+
+@Serializable
+data class ModelCatalogModel(
+    val id: String,
+    val name: String,
+    val description: String? = null,
+    val reasoning: ModelReasoning? = null,
+)
+
+@Serializable
+data class ModelProviderGroup(val id: String, val name: String, val models: List<ModelCatalogModel> = emptyList())
+
+@Serializable
+data class ModelCatalogFailure(val id: String, val name: String, val message: String = "")
+
+@Serializable
+data class SessionModels(
+    val sessionId: String,
+    val current: ModelSelection,
+    val routable: Boolean = true,
+    val groups: List<ModelProviderGroup> = emptyList(),
+    val failures: List<ModelCatalogFailure> = emptyList(),
+) {
+    /** The catalog entry for [selection] (the current route by default). */
+    fun model(selection: ModelSelection = current): ModelCatalogModel? =
+        groups.firstOrNull { it.id == selection.provider }?.models?.firstOrNull { it.id == selection.model }
+
+    fun displayName(selection: ModelSelection = current): String = model(selection)?.name ?: selection.model
+}
+
+@Serializable
+data class SessionModelSelected(val sessionId: String, val selected: ModelSelection)
+
+// ---------- attachments read-back ----------
+
+@Serializable
+data class AttachmentRequest(val sessionId: String, val attachmentId: String)
+
+@Serializable
+data class AttachmentData(val mediaType: String? = null, val data: String = "")
+
+// ---------- adding a project (§4b) ----------
+
+@Serializable
+data class DirectoryRequest(val path: String? = null)
+
+@Serializable
+data class DirectoryEntry(val name: String, val path: String, val hidden: Boolean = false)
+
+@Serializable
+data class DirectoryListing(
+    val path: String,
+    val home: String = "",
+    val crumbs: List<DirectoryEntry> = emptyList(),
+    val entries: List<DirectoryEntry> = emptyList(),
+    val truncated: Boolean = false,
+)
+
+@Serializable
+data class DirectoryPicked(val path: String? = null)
+
+@Serializable
+data class WorkspaceCreate(val path: String)
+
+@Serializable
+data class WorkspaceCreated(val workspace: Workspace, val created: Boolean = false)

@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,10 +25,10 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.Psychology
@@ -55,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.hailab.deeppilot.R
+import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.protocol.MessageAttachment
 import dev.hailab.deeppilot.core.protocol.MessageProjection
 import dev.hailab.deeppilot.core.protocol.ToolInfo
@@ -74,20 +76,20 @@ import kotlin.math.sin
 
 /** One timeline row, as iOS `ConversationTimelineRows` renders it. */
 @Composable
-fun TimelineRow(item: TimelineItem, onHeightChanged: () -> Unit) {
+fun TimelineRow(item: TimelineItem, sessionId: String, repository: BridgeRepository, onHeightChanged: () -> Unit) {
     when (item) {
-        is TimelineItem.Message -> MessageRow(item.message, onHeightChanged)
+        is TimelineItem.Message -> MessageRow(item.message, sessionId, repository, onHeightChanged)
         is TimelineItem.Activity -> TimelineActivityRow(item.entries)
         is TimelineItem.SystemContext -> SystemContextRow(item.messages)
     }
 }
 
 @Composable
-private fun MessageRow(message: MessageProjection, onHeightChanged: () -> Unit) {
+private fun MessageRow(message: MessageProjection, sessionId: String, repository: BridgeRepository, onHeightChanged: () -> Unit) {
     val p = palette
     when (message.role) {
-        "user" -> TrailingBubble { UserBubble(Timeline.displayText(message), message.attachments) }
-        "tool" -> ToolResultAttachmentRow(message)
+        "user" -> TrailingBubble { UserBubble(Timeline.displayText(message), message.attachments, sessionId, repository) }
+        "tool" -> ToolResultAttachmentRow(message, sessionId, repository)
         "error" -> Text(
             Timeline.displayText(message).orEmpty(),
             style = AppType.footnote,
@@ -100,7 +102,6 @@ private fun MessageRow(message: MessageProjection, onHeightChanged: () -> Unit) 
                 if (Timeline.displayText(message) != null) {
                     MarkdownMessage(markdown = text, key = message.seq, onHeightChanged = onHeightChanged)
                 }
-                message.attachments?.forEach { AttachmentLabel(it) }
                 if (message.streaming) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                         SmallSpinner(size = 11.dp)
@@ -125,15 +126,22 @@ fun TrailingBubble(content: @Composable () -> Unit) {
 
 /** A sent prompt: right-aligned on `secondarySystemFill`, radius 16. */
 @Composable
-fun UserBubble(text: String?, attachments: List<MessageAttachment>?, footer: (@Composable () -> Unit)? = null) {
+fun UserBubble(
+    text: String?,
+    attachments: List<MessageAttachment>?,
+    sessionId: String,
+    repository: BridgeRepository,
+    footer: (@Composable () -> Unit)? = null,
+) {
     val p = palette
     Column(
         Modifier
+            .then(if (attachments.isNullOrEmpty()) Modifier else Modifier.fillMaxWidth())
             .background(p.secondaryFill, RoundedCornerShape(AppRadius.large))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        attachments?.forEach { AttachmentLabel(it) }
+        attachments?.forEach { MessageAttachmentView(it, sessionId, repository) }
         if (text != null) {
             SelectionContainer { Text(text, style = AppType.body, color = p.foreground) }
         }
@@ -141,25 +149,65 @@ fun UserBubble(text: String?, attachments: List<MessageAttachment>?, footer: (@C
     }
 }
 
+/** A document chip, an image read back from the host, or (older bridges) just the photo's name. */
+@Composable
+private fun MessageAttachmentView(attachment: MessageAttachment, sessionId: String, repository: BridgeRepository) {
+    when {
+        attachment.kind == "document" -> DocumentAttachmentChip(attachment)
+        !attachment.attachmentId.isNullOrEmpty() -> AttachmentThumb(attachment, sessionId, repository)
+        else -> AttachmentLabel(attachment)
+    }
+}
+
 @Composable
 private fun AttachmentLabel(attachment: MessageAttachment) {
     val p = palette
-    val document = attachment.kind == "document"
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Icon(
-            if (document) Icons.Outlined.Description else Icons.Outlined.Image,
-            contentDescription = null,
-            tint = p.secondary,
-            modifier = Modifier.size(16.dp),
-        )
+        Icon(Icons.Outlined.Image, contentDescription = null, tint = p.secondary, modifier = Modifier.size(16.dp))
         Text(
-            attachment.name?.takeIf { it.isNotBlank() }
-                ?: stringResource(if (document) R.string.attachment_document else R.string.attachment_photo),
+            attachment.name?.takeIf { it.isNotBlank() } ?: stringResource(R.string.attachment_photo),
             style = AppType.footnote.copy(fontWeight = FontWeight.Medium),
             color = p.foreground,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/** iOS `DocumentAttachmentChip`: a document whose text went along with the message. */
+@Composable
+private fun DocumentAttachmentChip(attachment: MessageAttachment) {
+    val p = palette
+    val shape = RoundedCornerShape(AppRadius.medium)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(p.surface, shape)
+            .border(0.7.dp, p.hairline, shape)
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            Modifier.size(32.dp).background(p.mutedSurface, RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.Description, null, tint = p.muted, modifier = Modifier.size(18.dp))
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                attachment.name?.takeIf { it.isNotBlank() } ?: stringResource(R.string.attachment_document),
+                style = AppType.footnote.copy(fontWeight = FontWeight.SemiBold),
+                color = p.foreground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                stringResource(if (attachment.truncated == true) R.string.attachment_document_truncated else R.string.attachment_document_extracted),
+                style = AppType.caption2,
+                color = p.secondary,
+            )
+        }
     }
 }
 
@@ -205,7 +253,7 @@ private fun AssistantActionRow(text: String) {
 
 /** A tool result that carried images: a header, then the attachments and summary. */
 @Composable
-private fun ToolResultAttachmentRow(message: MessageProjection) {
+private fun ToolResultAttachmentRow(message: MessageProjection, sessionId: String, repository: BridgeRepository) {
     val p = palette
     val state = message.tool?.let(::visualState) ?: ActivityState.Done
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -220,7 +268,7 @@ private fun ToolResultAttachmentRow(message: MessageProjection) {
             )
             Text(state.title(), style = AppType.caption2, color = state.color())
         }
-        message.attachments?.forEach { AttachmentLabel(it) }
+        message.attachments?.forEach { MessageAttachmentView(it, sessionId, repository) }
         message.tool?.summary?.trim()?.takeIf { it.isNotEmpty() }?.let {
             Text(it, style = MonoSmall, color = p.secondary, maxLines = 3, overflow = TextOverflow.Ellipsis)
         }

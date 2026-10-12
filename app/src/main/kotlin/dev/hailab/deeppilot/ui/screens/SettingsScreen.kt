@@ -12,7 +12,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.UnfoldMore
+import dev.hailab.deeppilot.data.AppLanguage
+import dev.hailab.deeppilot.data.AppearanceOption
+import dev.hailab.deeppilot.data.FontSizeOption
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -178,6 +189,8 @@ fun SettingsScreen(repository: BridgeRepository, onBack: () -> Unit, onPairAnoth
                 }
             }
 
+            AppearanceCard()
+
             // Background connection and notifications (Android has no APNs; see the push plan).
             Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.small)) {
                 SettingsCard {
@@ -268,6 +281,146 @@ fun SettingsScreen(repository: BridgeRepository, onBack: () -> Unit, onPairAnoth
                 TextButton(onClick = { confirmUnpair = false }) { Text(stringResource(R.string.action_cancel)) }
             },
         )
+    }
+}
+
+/** iOS `appearanceCard`: theme segments, text size and language menus. */
+@Composable
+private fun AppearanceCard() {
+    val p = palette
+    val preferences = LocalContext.current.graph.preferences
+    val appearance by preferences.appearance.collectAsStateWithLifecycle()
+    val fontSize by preferences.fontSize.collectAsStateWithLifecycle()
+    val language by preferences.language.collectAsStateWithLifecycle()
+    SettingsCard {
+        SettingsRow(title = stringResource(R.string.settings_theme)) {
+            SegmentedControl(
+                options = AppearanceOption.entries,
+                selected = appearance,
+                label = { stringResource(it.titleRes()) },
+                onSelect = preferences::setAppearance,
+                modifier = Modifier.widthIn(max = 210.dp),
+            )
+        }
+        SettingsDivider()
+        SettingsRow(title = stringResource(R.string.settings_font_size)) {
+            MenuPicker(
+                options = FontSizeOption.entries,
+                selected = fontSize,
+                label = { stringResource(it.titleRes()) },
+                onSelect = preferences::setFontSize,
+            )
+        }
+        SettingsDivider()
+        SettingsRow(title = stringResource(R.string.settings_language)) {
+            MenuPicker(
+                options = AppLanguage.entries,
+                selected = language,
+                label = {
+                    when (it) {
+                        AppLanguage.System -> stringResource(R.string.settings_language_system)
+                        // Each language in its own script, so it is recognisable from any other.
+                        AppLanguage.Chinese -> "简体中文"
+                        AppLanguage.English -> "English"
+                    }
+                },
+                onSelect = { if (it != language) preferences.setLanguage(it) },
+            )
+        }
+    }
+}
+
+private fun AppearanceOption.titleRes() = when (this) {
+    AppearanceOption.System -> R.string.appearance_system
+    AppearanceOption.Light -> R.string.appearance_light
+    AppearanceOption.Dark -> R.string.appearance_dark
+}
+
+private fun FontSizeOption.titleRes() = when (this) {
+    FontSizeOption.System -> R.string.font_size_automatic
+    FontSizeOption.Small -> R.string.font_size_small
+    FontSizeOption.Medium -> R.string.font_size_medium
+    FontSizeOption.Large -> R.string.font_size_large
+    FontSizeOption.XLarge -> R.string.font_size_xlarge
+}
+
+/** UIKit-style segmented control: a gray track with the chosen segment raised. */
+@Composable
+private fun <T> SegmentedControl(
+    options: List<T>,
+    selected: T,
+    label: @Composable (T) -> String,
+    onSelect: (T) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val p = palette
+    Row(
+        modifier
+            .height(32.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(p.tertiaryFill)
+            .padding(2.dp),
+    ) {
+        options.forEach { option ->
+            val chosen = option == selected
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .then(
+                        if (chosen) {
+                            Modifier
+                                .shadow(2.dp, RoundedCornerShape(7.dp))
+                                .background(if (p.dark) Color(0xFF636366) else Color.White, RoundedCornerShape(7.dp))
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .plainClickable { onSelect(option) }
+                    .padding(horizontal = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label(option),
+                    style = AppType.footnote.copy(fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium),
+                    color = p.foreground,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/** iOS `Menu` with the current value and an up/down chevron; the chosen item carries a check. */
+@Composable
+private fun <T> MenuPicker(options: List<T>, selected: T, label: @Composable (T) -> String, onSelect: (T) -> Unit) {
+    val p = palette
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.heightIn(min = 44.dp).plainClickable { open = true },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(label(selected), style = AppType.body, color = p.secondary, maxLines = 1)
+            Icon(Icons.Filled.UnfoldMore, null, tint = p.tertiary, modifier = Modifier.size(16.dp))
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }, containerColor = p.surface) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(label(option), style = AppType.body, color = p.foreground) },
+                    leadingIcon = {
+                        Box(Modifier.size(18.dp)) {
+                            if (option == selected) Icon(Icons.Filled.Check, null, tint = p.foreground, modifier = Modifier.size(18.dp))
+                        }
+                    },
+                    onClick = {
+                        open = false
+                        onSelect(option)
+                    },
+                )
+            }
+        }
     }
 }
 

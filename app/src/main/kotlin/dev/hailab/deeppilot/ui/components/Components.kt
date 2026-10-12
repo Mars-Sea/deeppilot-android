@@ -252,11 +252,22 @@ fun NavBar(
     trailing: @Composable RowScope.() -> Unit = {},
     principal: @Composable BoxScope.() -> Unit = {},
 ) {
+    NavBarContent(modifier.background(palette.background).statusBarsPadding(), leading, trailing, principal)
+}
+
+/** The bar itself without the status-bar inset, for sheets that own their own top edge. */
+@Composable
+fun NavBarContent(
+    modifier: Modifier = Modifier,
+    leading: @Composable RowScope.() -> Unit = {},
+    trailing: @Composable RowScope.() -> Unit = {},
+    principal: @Composable BoxScope.() -> Unit = {},
+    background: Color = palette.background,
+) {
     Box(
         modifier
             .fillMaxWidth()
-            .background(palette.background)
-            .statusBarsPadding()
+            .background(background)
             .height(52.dp)
             .padding(horizontal = 6.dp),
     ) {
