@@ -1,0 +1,93 @@
+/* Mirrors the iOS MarkdownView: 17px body with 5px extra leading, 16px between blocks. */
+:root {
+  --text: #111111; --secondary: rgba(60, 60, 67, 0.6); --link: #4d6bfe;
+  --surface: #f2f2f7; --muted-surface: rgba(17, 17, 17, 0.05);
+  --hairline: rgba(217, 222, 231, 0.72); --edge: rgba(17, 17, 17, 0.07); --quote-bar: rgba(17, 17, 17, 0.22);
+  color-scheme: light dark;
+}
+html, body { margin: 0; padding: 0; background: transparent; }
+body {
+  color: var(--text);
+  font: 17px/27px -apple-system, "Roboto", "Noto Sans CJK SC", sans-serif;
+  overflow-wrap: anywhere;
+  -webkit-text-size-adjust: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#content > :first-child { margin-top: 0; }
+#content > :last-child { margin-bottom: 0; }
+p, ul, ol, blockquote, .code-block, .table-block, .katex-display { margin: 0 0 16px; }
+h1, h2, h3, h4, h5, h6 { margin: 0 0 16px; line-height: 1.3; }
+h1 { font-size: 20px; font-weight: 700; padding-top: 7px; }
+h2 { font-size: 17px; font-weight: 700; padding-top: 7px; }
+h3, h4, h5, h6 { font-size: 17px; font-weight: 600; padding-top: 3px; }
+strong { font-weight: 600; }
+ul, ol { padding-left: 0; list-style: none; }
+li { position: relative; margin: 0 0 10px; }
+li:last-child { margin-bottom: 0; }
+ul > li { padding-left: 13px; }
+ul > li::before {
+  content: ""; position: absolute; left: 0; top: 11.5px;
+  width: 4px; height: 4px; border-radius: 2px; background: var(--secondary);
+}
+ol { counter-reset: item; }
+ol > li { counter-increment: item; padding-left: 26px; }
+ol > li::before {
+  content: counter(item) "."; position: absolute; left: 0;
+  color: var(--secondary); font-variant-numeric: tabular-nums;
+}
+li > p { margin: 0; }
+li > ul, li > ol { margin: 10px 0 0; }
+a { color: var(--link); text-decoration: none; }
+code { font-family: ui-monospace, "Roboto Mono", monospace; font-size: 0.9em; }
+:not(pre) > code { background: var(--muted-surface); border-radius: 5px; padding: 0.1em 0.3em; }
+blockquote {
+  position: relative; color: var(--secondary);
+  padding: 3px 0 3px 13px; margin-left: 0; margin-right: 0;
+}
+blockquote::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px; border-radius: 1.5px; background: var(--quote-bar);
+}
+blockquote > :last-child { margin-bottom: 0; }
+hr { border: none; border-top: 0.5px solid var(--hairline); margin: 0 0 16px; }
+
+/* Code block: language + copy header, divider, scrolling monospaced body. */
+.code-block {
+  background: var(--surface); border-radius: 12px; overflow: hidden;
+  box-shadow: inset 0 0 0 0.7px var(--edge);
+}
+.block-head {
+  display: flex; align-items: center; justify-content: space-between;
+  min-height: 38px; padding: 0 12px; border-bottom: 0.5px solid var(--hairline);
+}
+.code-lang { font-size: 11px; font-weight: 600; color: var(--secondary); letter-spacing: 0.2px; }
+.block-button {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: none; background: none; padding: 8px 0; margin: 0;
+  font: 500 12px -apple-system, "Roboto", sans-serif; color: var(--secondary);
+}
+.block-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.code-block pre { margin: 0; padding: 12px; overflow-x: auto; }
+.code-block pre code { font-size: 13px; line-height: 18px; white-space: pre; }
+
+/* Table: title + copy header, scrolling grid with fixed column widths. */
+.table-block {
+  background: var(--surface); border-radius: 16px; overflow: hidden;
+  box-shadow: inset 0 0 0 0.8px var(--edge);
+}
+.table-block .block-head { padding: 0 2px 0 14px; min-height: 46px; }
+.table-title { font-size: 17px; font-weight: 600; }
+.table-block .block-button { width: 44px; height: 44px; justify-content: center; padding: 0; }
+.table-block .block-button svg { width: 17px; height: 17px; }
+.table-scroll { overflow-x: auto; }
+table { border-collapse: collapse; }
+th, td {
+  font-size: 15px; line-height: 24px; text-align: left; vertical-align: top;
+  padding: 11px 13px; min-width: 122px; border: 0.5px solid var(--hairline);
+}
+th { font-weight: 600; background: var(--muted-surface); }
+tr:nth-child(even) td { background: rgba(127, 127, 127, 0.018); }
+
+.katex { font-size: 1.05em; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.katex-error { color: var(--secondary); }
