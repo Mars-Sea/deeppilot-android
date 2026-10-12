@@ -49,6 +49,8 @@ object FrameType {
     const val SESSION_CREATE = "c2s.session.create"
     const val SESSION_RENAME = "c2s.session.rename"
     const val SESSION_ARCHIVE = "c2s.session.archive"
+    const val SESSIONS_ARCHIVED = "c2s.sessions.archived"
+    const val SESSION_UNARCHIVE = "c2s.session.unarchive"
 
     const val SESSION_MODELS = "c2s.session.models"
     const val SESSION_SELECT_MODEL = "c2s.session.selectModel"
@@ -177,6 +179,10 @@ data class SessionSummary(
 
 @Serializable
 data class SessionsSnapshot(val full: Boolean = true, val sessions: List<SessionSummary> = emptyList())
+
+/** Answer to `c2s.sessions.archived` (§4c); rows never appear in the live list. */
+@Serializable
+data class ArchivedSessionsSnapshot(val sessions: List<SessionSummary> = emptyList())
 
 @Serializable
 data class SessionsDelta(

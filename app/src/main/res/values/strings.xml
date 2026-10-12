@@ -251,4 +251,17 @@
     <string name="thinking_current_a11y">Adjust thinking intensity, current: %1$s</string>
     <string name="thinking_default">Default</string>
     <string name="thinking_unsupported">The DeepPilot plugin doesn\'t support changing thinking intensity. Update the plugin and try again.</string>
+    <string name="common_retry">Retry</string>
+    <string name="archived_title">Archived Sessions</string>
+    <string name="archived_empty">No archived sessions</string>
+    <string name="archived_explainer">Archiving only removes a session from the normal list; its log and project location are kept. Restore it to continue the conversation.</string>
+    <string name="archived_load_failed">Failed to load</string>
+    <string name="archived_loading">Loading…</string>
+    <string name="archived_restore">Restore</string>
+    <string name="archived_restore_failed">Couldn\'t restore</string>
+    <string name="archived_unsupported">The current plugin version can\'t browse or restore archived sessions. Update the DeepPilot plugin on your computer.</string>
+    <string name="settings_icon_title">App Icon</string>
+    <string name="settings_icon_default">Default</string>
+    <string name="settings_icon_flow">Flow</string>
+    <string name="settings_icon_explainer">Some launchers take a moment to update the home screen icon after switching.</string>
 </resources>

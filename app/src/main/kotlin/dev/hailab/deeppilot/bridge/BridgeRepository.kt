@@ -1,33 +1,28 @@
 package dev.hailab.deeppilot.bridge
 
+import android.graphics.Bitmap
+import dev.hailab.deeppilot.attachments.AttachmentImages
+import dev.hailab.deeppilot.core.attachments.PromptAttachment
+import dev.hailab.deeppilot.core.attachments.promptDocuments
+import dev.hailab.deeppilot.core.attachments.promptImages
 import dev.hailab.deeppilot.core.bridge.BridgeClient
 import dev.hailab.deeppilot.core.bridge.ConnectionState
 import dev.hailab.deeppilot.core.bridge.HostCredentials
 import dev.hailab.deeppilot.core.bridge.NotConnectedException
 import dev.hailab.deeppilot.core.pairing.PairingClient
 import dev.hailab.deeppilot.core.pairing.PairingLink
-import android.graphics.Bitmap
-import dev.hailab.deeppilot.attachments.AttachmentImages
-import dev.hailab.deeppilot.core.attachments.PromptAttachment
-import dev.hailab.deeppilot.core.attachments.promptDocuments
-import dev.hailab.deeppilot.core.attachments.promptImages
 import dev.hailab.deeppilot.core.protocol.ApprovalRespond
+import dev.hailab.deeppilot.core.protocol.ArchivedSessionsSnapshot
 import dev.hailab.deeppilot.core.protocol.AttachmentData
 import dev.hailab.deeppilot.core.protocol.AttachmentRequest
 import dev.hailab.deeppilot.core.protocol.DirectoryListing
 import dev.hailab.deeppilot.core.protocol.DirectoryPicked
 import dev.hailab.deeppilot.core.protocol.DirectoryRequest
-import dev.hailab.deeppilot.core.protocol.ModelSelection
-import dev.hailab.deeppilot.core.protocol.SelectModelRequest
-import dev.hailab.deeppilot.core.protocol.SessionModelSelected
-import dev.hailab.deeppilot.core.protocol.SessionModels
-import dev.hailab.deeppilot.core.protocol.SessionModelsRequest
-import dev.hailab.deeppilot.core.protocol.WorkspaceCreate
-import dev.hailab.deeppilot.core.protocol.WorkspaceCreated
 import dev.hailab.deeppilot.core.protocol.Envelope
 import dev.hailab.deeppilot.core.protocol.FrameType
 import dev.hailab.deeppilot.core.protocol.HistoryPage
 import dev.hailab.deeppilot.core.protocol.HistoryRequest
+import dev.hailab.deeppilot.core.protocol.ModelSelection
 import dev.hailab.deeppilot.core.protocol.Notify
 import dev.hailab.deeppilot.core.protocol.NotifyCategory
 import dev.hailab.deeppilot.core.protocol.PendingApproval
@@ -36,20 +31,27 @@ import dev.hailab.deeppilot.core.protocol.PendingQuestion
 import dev.hailab.deeppilot.core.protocol.PendingSnapshot
 import dev.hailab.deeppilot.core.protocol.QuestionAnswer
 import dev.hailab.deeppilot.core.protocol.QuestionRespond
+import dev.hailab.deeppilot.core.protocol.SelectModelRequest
 import dev.hailab.deeppilot.core.protocol.SendPrompt
 import dev.hailab.deeppilot.core.protocol.SessionCreate
 import dev.hailab.deeppilot.core.protocol.SessionCreated
-import dev.hailab.deeppilot.core.protocol.SessionRename
-import dev.hailab.deeppilot.core.protocol.Workspace
-import dev.hailab.deeppilot.core.protocol.WorkspacesSnapshot
 import dev.hailab.deeppilot.core.protocol.SessionEvent
+import dev.hailab.deeppilot.core.protocol.SessionModelSelected
+import dev.hailab.deeppilot.core.protocol.SessionModels
+import dev.hailab.deeppilot.core.protocol.SessionModelsRequest
 import dev.hailab.deeppilot.core.protocol.SessionOpen
 import dev.hailab.deeppilot.core.protocol.SessionRef
+import dev.hailab.deeppilot.core.protocol.SessionRename
+import dev.hailab.deeppilot.core.protocol.SessionRenamed
 import dev.hailab.deeppilot.core.protocol.SessionSummary
 import dev.hailab.deeppilot.core.protocol.SessionTail
 import dev.hailab.deeppilot.core.protocol.SessionsDelta
 import dev.hailab.deeppilot.core.protocol.SessionsSnapshot
 import dev.hailab.deeppilot.core.protocol.WelcomeCapabilities
+import dev.hailab.deeppilot.core.protocol.Workspace
+import dev.hailab.deeppilot.core.protocol.WorkspaceCreate
+import dev.hailab.deeppilot.core.protocol.WorkspaceCreated
+import dev.hailab.deeppilot.core.protocol.WorkspacesSnapshot
 import dev.hailab.deeppilot.core.session.NotificationDeduper
 import dev.hailab.deeppilot.core.session.OpenSession
 import dev.hailab.deeppilot.core.session.SessionList
@@ -58,6 +60,7 @@ import dev.hailab.deeppilot.data.DeviceIdentity
 import dev.hailab.deeppilot.data.InstanceStore
 import dev.hailab.deeppilot.notify.Notifier
 import dev.hailab.deeppilot.security.DeviceKeys
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,7 +70,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import java.util.UUID
 
 /**
  * App-level state mirrored from the paired bridge: session list, the open
@@ -323,14 +325,31 @@ class BridgeRepository(
 
     suspend fun renameSession(sessionId: String, title: String) {
         requireAuthenticated()
-        client.request(FrameType.SESSION_RENAME, SessionRename.serializer(), SessionRename(sessionId, title))
-        _sessions.update { list -> list.map { if (it.id == sessionId) it.copy(title = title) else it } }
+        val reply = client.request(FrameType.SESSION_RENAME, SessionRename.serializer(), SessionRename(sessionId, title))
+        // The host may normalize the name; show what it accepted.
+        val accepted = reply.decode(SessionRenamed.serializer())?.title?.takeIf { it.isNotEmpty() } ?: title
+        _sessions.update { list -> list.map { if (it.id == sessionId) it.copy(title = accepted) else it } }
     }
 
     suspend fun archiveSession(sessionId: String) {
         requireAuthenticated()
         client.request(FrameType.SESSION_ARCHIVE, SessionRef.serializer(), SessionRef(sessionId))
         _sessions.update { list -> list.filterNot { it.id == sessionId } }
+    }
+
+    /** Archived rows, fetched on demand for the archived screen (§4c). */
+    suspend fun loadArchivedSessions(): List<SessionSummary> {
+        requireAuthenticated()
+        if (_capabilities.value?.sessionRestore != true) throw UnsupportedFeatureException()
+        val reply = client.request(FrameType.SESSIONS_ARCHIVED)
+        return reply.decode(ArchivedSessionsSnapshot.serializer())?.sessions ?: throw InvalidResponseException()
+    }
+
+    /** Restores an archived session; the bridge then re-sends it in a sessions delta. */
+    suspend fun unarchiveSession(sessionId: String) {
+        requireAuthenticated()
+        if (_capabilities.value?.sessionRestore != true) throw UnsupportedFeatureException()
+        client.request(FrameType.SESSION_UNARCHIVE, SessionRef.serializer(), SessionRef(sessionId))
     }
 
     private fun requireAuthenticated() {

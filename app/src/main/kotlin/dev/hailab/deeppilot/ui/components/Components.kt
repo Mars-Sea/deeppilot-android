@@ -46,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.core.bridge.ConnectionState
+import dev.hailab.deeppilot.ui.AppIconChoice
 import dev.hailab.deeppilot.ui.AppLayout
 import dev.hailab.deeppilot.ui.AppRadius
 import dev.hailab.deeppilot.ui.AppSpacing
@@ -117,9 +119,14 @@ fun SettingsRow(
     }
 }
 
-/** iOS `AppIconArtwork`: the gradient glyph on white, padded 13%, radius 22.5%, soft shadow. */
+/**
+ * iOS `AppIconArtwork`: the gradient glyph on white, padded 13%, radius 22.5%, soft shadow.
+ * [choice] null shows the icon currently on the home screen.
+ */
 @Composable
-fun AppIcon(size: Dp) {
+fun AppIcon(size: Dp, choice: AppIconChoice? = null) {
+    val context = LocalContext.current
+    val shown = choice ?: remember { AppIconChoice.current(context) }
     val shape = RoundedCornerShape(size * 0.225f)
     Box(
         Modifier
@@ -129,7 +136,7 @@ fun AppIcon(size: Dp) {
             .background(Color.White)
             .padding(size * 0.13f),
     ) {
-        Image(painterResource(R.drawable.app_icon_glyph), contentDescription = null, modifier = Modifier.fillMaxSize())
+        Image(painterResource(shown.glyph), contentDescription = null, modifier = Modifier.fillMaxSize())
     }
 }
 

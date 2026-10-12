@@ -19,6 +19,12 @@ object SessionGroups {
                     .thenBy(String.CASE_INSENSITIVE_ORDER) { it.workspace.orEmpty() },
             )
     }
+
+    /** Archived-list grouping (iOS `ArchivedSessionProjection`): like [make], but uncategorized rows go last. */
+    fun archived(sessions: List<SessionSummary>): List<SessionGroup> {
+        val groups = make(sessions)
+        return groups.filter { it.workspace != null } + groups.filter { it.workspace == null }
+    }
 }
 
 /** Compact relative time as in the iOS session rows ("刚刚", "5分", "3小时", …). */

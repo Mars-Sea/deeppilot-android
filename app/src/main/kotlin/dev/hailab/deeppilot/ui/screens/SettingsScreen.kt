@@ -84,7 +84,13 @@ import dev.hailab.deeppilot.ui.palette
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen(repository: BridgeRepository, onBack: () -> Unit, onPairAnother: () -> Unit) {
+fun SettingsScreen(
+    repository: BridgeRepository,
+    onBack: () -> Unit,
+    onPairAnother: () -> Unit,
+    onOpenIcons: () -> Unit,
+    onOpenArchived: () -> Unit,
+) {
     val p = palette
     val context = LocalContext.current
     val host by repository.host.collectAsStateWithLifecycle()
@@ -190,6 +196,14 @@ fun SettingsScreen(repository: BridgeRepository, onBack: () -> Unit, onPairAnoth
             }
 
             AppearanceCard()
+
+            SettingsCard {
+                SettingsRow(title = stringResource(R.string.settings_icon_title), onClick = onOpenIcons) { Chevron() }
+            }
+
+            SettingsCard {
+                SettingsRow(title = stringResource(R.string.archived_title), onClick = onOpenArchived) { Chevron() }
+            }
 
             // Background connection and notifications (Android has no APNs; see the push plan).
             Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.small)) {

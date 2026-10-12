@@ -124,8 +124,12 @@ fun MainShell(
                         repository = repository,
                         onBack = { nav.popBackStack() },
                         onPairAnother = onPairAnother,
+                        onOpenIcons = { nav.navigate(APP_ICON) { launchSingleTop = true } },
+                        onOpenArchived = { nav.navigate(ARCHIVED) { launchSingleTop = true } },
                     )
                 }
+                composable(APP_ICON) { AppIconScreen(onBack = { nav.popBackStack() }) }
+                composable(ARCHIVED) { ArchivedSessionsScreen(repository = repository, onBack = { nav.popBackStack() }) }
             }
             if (progress > 0.001f) {
                 Box(Modifier.fillMaxSize().then(drawerDrag).plainClickable { settle(false) })
@@ -176,3 +180,5 @@ fun MainShell(
 private const val HOME = "home"
 private const val SESSION = "session/{id}"
 private const val SETTINGS = "settings"
+private const val APP_ICON = "settings/icon"
+private const val ARCHIVED = "settings/archived"
