@@ -1,6 +1,8 @@
 package dev.hailab.deeppilot.ui.markdown
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -84,6 +86,14 @@ class MessageWebView(context: Context) : WebView(context) {
         @JavascriptInterface
         fun onHeight(height: Int) {
             post { onHeight(height) }
+        }
+
+        /** Copy buttons on code blocks and tables. */
+        @JavascriptInterface
+        fun copy(text: String) {
+            post {
+                context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("DeepPilot", text))
+            }
         }
     }
 

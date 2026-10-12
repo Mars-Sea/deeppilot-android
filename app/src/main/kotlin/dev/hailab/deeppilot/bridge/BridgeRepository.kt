@@ -20,6 +20,11 @@ import dev.hailab.deeppilot.core.protocol.PendingSnapshot
 import dev.hailab.deeppilot.core.protocol.QuestionAnswer
 import dev.hailab.deeppilot.core.protocol.QuestionRespond
 import dev.hailab.deeppilot.core.protocol.SendPrompt
+import dev.hailab.deeppilot.core.protocol.SessionCreate
+import dev.hailab.deeppilot.core.protocol.SessionCreated
+import dev.hailab.deeppilot.core.protocol.SessionRename
+import dev.hailab.deeppilot.core.protocol.Workspace
+import dev.hailab.deeppilot.core.protocol.WorkspacesSnapshot
 import dev.hailab.deeppilot.core.protocol.SessionEvent
 import dev.hailab.deeppilot.core.protocol.SessionOpen
 import dev.hailab.deeppilot.core.protocol.SessionRef
@@ -217,6 +222,32 @@ class BridgeRepository(
         val clean = answers.map { answer -> answer.copy(custom = answer.custom?.takeIf { it.isNotBlank() }) }
         client.request(FrameType.QUESTION_RESPOND, QuestionRespond.serializer(), QuestionRespond(requestId, clean))
         clearPending(requestId)
+    }
+
+    /** Projects on the host for the new-session picker (§4b). */
+    suspend fun loadWorkspaces(): List<Workspace> {
+        requireAuthenticated()
+        return client.request(FrameType.WORKSPACES_LIST).decode(WorkspacesSnapshot.serializer())?.workspaces.orEmpty()
+    }
+
+    /** Creates an empty session in [workspaceId]; returns its id. */
+    suspend fun createSession(workspaceId: String): String? {
+        requireAuthenticated()
+        val reply = client.request(FrameType.SESSION_CREATE, SessionCreate.serializer(), SessionCreate(workspaceId))
+        client.send(FrameType.SESSIONS_LIST)
+        return reply.decode(SessionCreated.serializer())?.sessionId
+    }
+
+    suspend fun renameSession(sessionId: String, title: String) {
+        requireAuthenticated()
+        client.request(FrameType.SESSION_RENAME, SessionRename.serializer(), SessionRename(sessionId, title))
+        _sessions.update { list -> list.map { if (it.id == sessionId) it.copy(title = title) else it } }
+    }
+
+    suspend fun archiveSession(sessionId: String) {
+        requireAuthenticated()
+        client.request(FrameType.SESSION_ARCHIVE, SessionRef.serializer(), SessionRef(sessionId))
+        _sessions.update { list -> list.filterNot { it.id == sessionId } }
     }
 
     private fun requireAuthenticated() {

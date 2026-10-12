@@ -43,6 +43,12 @@ object FrameType {
 
     const val NOTIFY = "s2c.notify"
     const val DEVICE_REVOKE = "c2s.device.revoke"
+
+    const val WORKSPACES_LIST = "c2s.workspaces.list"
+    const val WORKSPACES_SNAPSHOT = "s2c.workspaces.snapshot"
+    const val SESSION_CREATE = "c2s.session.create"
+    const val SESSION_RENAME = "c2s.session.rename"
+    const val SESSION_ARCHIVE = "c2s.session.archive"
 }
 
 /** Device scopes requested at pairing; the product grants all of them (§2.2). */
@@ -361,3 +367,28 @@ data class Notify(
 
 @Serializable
 data class RevokeAck(val revoked: Boolean = false)
+
+// ---------- projects and session management (§4b, §4c) ----------
+
+@Serializable
+data class Workspace(
+    val id: String,
+    val title: String = "",
+    val path: String = "",
+    val sessionIds: List<String> = emptyList(),
+)
+
+@Serializable
+data class WorkspacesSnapshot(val workspaces: List<Workspace> = emptyList())
+
+@Serializable
+data class SessionCreate(val workspaceId: String)
+
+@Serializable
+data class SessionCreated(val sessionId: String? = null)
+
+@Serializable
+data class SessionRename(val sessionId: String, val title: String)
+
+@Serializable
+data class SessionRenamed(val sessionId: String? = null, val title: String? = null)

@@ -2,7 +2,6 @@ package dev.hailab.deeppilot.ui.markdown
 
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -12,9 +11,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.core.markdown.MarkdownMath
+import dev.hailab.deeppilot.ui.palette
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -36,16 +38,26 @@ fun MarkdownMessage(
     modifier: Modifier = Modifier,
     onHeightChanged: () -> Unit = {},
 ) {
-    val colors = MaterialTheme.colorScheme
+    val p = palette
     val textZoom = (LocalDensity.current.fontScale * 100).toInt()
     val theme = mapOf(
-        "text" to colors.onSurface,
-        "muted" to colors.onSurfaceVariant,
-        "link" to colors.primary,
-        "code-bg" to colors.surfaceVariant,
-        "border" to colors.outlineVariant,
+        "text" to p.foreground,
+        "secondary" to p.secondary,
+        "link" to p.accent,
+        "surface" to p.surface,
+        "muted-surface" to p.mutedSurface,
+        "hairline" to p.hairline,
+        "edge" to p.foreground.copy(alpha = 0.07f),
+        "quote-bar" to p.foreground.copy(alpha = 0.22f),
     )
-    val payload = remember(markdown, theme) {
+    val labels = mapOf(
+        "code" to stringResource(R.string.markdown_code),
+        "copy" to stringResource(R.string.markdown_code_copy),
+        "copied" to stringResource(R.string.markdown_code_copied),
+        "table" to stringResource(R.string.markdown_table),
+        "copyTable" to stringResource(R.string.markdown_table_copy),
+    )
+    val payload = remember(markdown, theme, labels) {
         val prepared = MarkdownMath.prepare(markdown)
         buildJsonObject {
             put("markdown", prepared.markdown)
@@ -61,6 +73,7 @@ fun MarkdownMessage(
                 },
             )
             put("theme", buildJsonObject { theme.forEach { (name, color) -> put(name, JsonPrimitive(color.css())) } })
+            put("labels", buildJsonObject { labels.forEach { (name, text) -> put(name, text) } })
         }.toString()
     }
     var height by remember(key) { mutableIntStateOf(synchronized(heightCache) { heightCache[key] } ?: 0) }
@@ -84,4 +97,8 @@ fun MarkdownMessage(
     )
 }
 
-private fun Color.css(): String = String.format("#%06X", toArgb() and 0xFFFFFF)
+/** CSS rgba(), so translucent tokens (hairline, muted surface) keep their alpha. */
+private fun Color.css(): String {
+    val argb = toArgb()
+    return "rgba(${(argb shr 16) and 0xFF}, ${(argb shr 8) and 0xFF}, ${argb and 0xFF}, ${"%.3f".format(java.util.Locale.US, alpha)})"
+}

@@ -1,6 +1,14 @@
 package dev.hailab.deeppilot.ui.screens
 
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,69 +19,67 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.AddComment
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.snapshotFlow
-import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.bridge.ConnectionState
-import dev.hailab.deeppilot.core.protocol.MessageProjection
-import dev.hailab.deeppilot.core.session.ToolFolding
+import dev.hailab.deeppilot.core.protocol.PendingApproval
+import dev.hailab.deeppilot.core.protocol.PendingQuestion
+import dev.hailab.deeppilot.core.session.Timeline
+import dev.hailab.deeppilot.ui.AppType
 import dev.hailab.deeppilot.ui.attempt
-import dev.hailab.deeppilot.ui.connectionText
+import dev.hailab.deeppilot.ui.components.BackButton
+import dev.hailab.deeppilot.ui.components.BarIconButton
+import dev.hailab.deeppilot.ui.components.NavBar
+import dev.hailab.deeppilot.ui.components.SmallSpinner
+import dev.hailab.deeppilot.ui.components.plainClickable
 import dev.hailab.deeppilot.ui.errorMessage
-import dev.hailab.deeppilot.ui.markdown.MarkdownMessage
+import dev.hailab.deeppilot.ui.palette
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionScreen(repository: BridgeRepository, sessionId: String, onBack: () -> Unit) {
+fun SessionScreen(
+    repository: BridgeRepository,
+    sessionId: String,
+    onBack: () -> Unit,
+    onNewSession: () -> Unit,
+) {
     DisposableEffect(sessionId) {
         repository.openSession(sessionId)
         onDispose { repository.closeSession(sessionId) }
     }
+    val p = palette
     val open by repository.openSession.collectAsStateWithLifecycle()
     val sessions by repository.sessions.collectAsStateWithLifecycle()
     val connection by repository.connection.collectAsStateWithLifecycle()
@@ -83,23 +89,29 @@ fun SessionScreen(repository: BridgeRepository, sessionId: String, onBack: () ->
     val questions = allQuestions.filter { it.sessionId == sessionId }
 
     val state = open?.takeIf { it.sessionId == sessionId }
-    val messages = remember(state?.messages) { ToolFolding.fold(state?.messages.orEmpty()) }
-    val title = sessions.firstOrNull { it.id == sessionId }?.title?.ifBlank { null } ?: stringResource(R.string.session_untitled)
+    val rows = remember(state?.messages) { Timeline.group(state?.messages.orEmpty()) }
+    val summary = sessions.firstOrNull { it.id == sessionId }
+    val title = summary?.title?.ifBlank { null } ?: stringResource(R.string.conversation_untitled)
     val connected = connection is ConnectionState.Authenticated
     val running = state?.turnRunning == true
 
     val scope = rememberCoroutineScope()
-    val snackbar = remember { SnackbarHostState() }
     val context = LocalContext.current
     var draft by rememberSaveable(sessionId) { mutableStateOf("") }
-    var sending by remember { mutableStateOf(false) }
+    var pendingText by remember { mutableStateOf<String?>(null) }
+    var sendError by remember { mutableStateOf<String?>(null) }
+    var stopping by remember { mutableStateOf(false) }
+    var showsTodos by remember { mutableStateOf(false) }
 
-    fun report(error: Throwable?) {
-        if (error != null) scope.launch { snackbar.showSnackbar(context.errorMessage(error)) }
-    }
+    // Pending approval/question half sheet, with a chip to bring back a dismissed one.
+    var dismissed by remember(sessionId) { mutableStateOf(setOf<String>()) }
+    var submitting by remember { mutableStateOf(false) }
+    var pendingError by remember { mutableStateOf<String?>(null) }
+    val pendingIds = approvals.map { it.requestId } + questions.map { it.requestId }
+    val activeId = pendingIds.firstOrNull { it !in dismissed }
+    val reopenId = if (activeId == null) pendingIds.firstOrNull { it in dismissed } else null
 
     val listState = rememberLazyListState()
-    val itemCount = messages.size + approvals.size + questions.size + if (state?.hasMore == true) 1 else 0
     val atBottom by remember {
         derivedStateOf {
             val info = listState.layoutInfo
@@ -107,7 +119,6 @@ fun SessionScreen(repository: BridgeRepository, sessionId: String, onBack: () ->
             last.index >= info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 8
         }
     }
-    // Follow the conversation while the user is at the bottom; stop once they scroll up.
     var stickToBottom by remember(sessionId) { mutableStateOf(true) }
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { if (it is DragInteraction.Start) stickToBottom = false }
@@ -115,231 +126,246 @@ fun SessionScreen(repository: BridgeRepository, sessionId: String, onBack: () ->
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress }.collect { scrolling -> if (!scrolling && atBottom) stickToBottom = true }
     }
-    // Bumped when a rendered message changes height (Markdown and formulas lay out after load).
+    // Older history loads when the top of the timeline comes into view.
+    val nearTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.layoutInfo.totalItemsCount > 1 } }
+    LaunchedEffect(nearTop, state?.hasMore, state?.loadingHistory) {
+        if (nearTop && state?.hasMore == true && !state.loadingHistory && !stickToBottom) repository.loadOlder()
+    }
     var layoutTick by remember { mutableIntStateOf(0) }
-    val tailKey = messages.lastOrNull()?.let { it.seq to (it.text?.length ?: 0) + (it.thinking?.length ?: 0) }
-    LaunchedEffect(tailKey, approvals.size, questions.size, layoutTick) {
-        if (itemCount > 0 && stickToBottom) {
-            listState.scrollToItem(itemCount - 1)
+    val tail = state?.messages?.lastOrNull()
+    val tailKey = tail?.let { it.seq to (it.text?.length ?: 0) + (it.thinking?.length ?: 0) }
+    LaunchedEffect(tailKey, pendingText, layoutTick, rows.size) {
+        if (stickToBottom && listState.layoutInfo.totalItemsCount > 0) {
+            listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
             listState.scrollBy(1_000_000f)
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val subtitle = when {
-                            !connected -> connectionText(connection)
-                            running -> stringResource(R.string.session_running)
-                            else -> null
-                        }
-                        subtitle?.let { Text(it, style = MaterialTheme.typography.labelMedium) }
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
-                    }
-                },
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = {
-            Composer(
-                text = draft,
-                onTextChange = { draft = it },
-                enabled = connected && !sending,
-                running = running,
-                onSend = {
-                    val text = draft.trim()
-                    if (text.isNotEmpty()) {
-                        scope.launch {
-                            sending = true
-                            val error = attempt { repository.sendPrompt(sessionId, text) }
-                            sending = false
-                            if (error == null) draft = "" else snackbar.showSnackbar(context.errorMessage(error))
-                        }
-                    }
-                },
-                onStop = { scope.launch { report(attempt { repository.cancelTurn(sessionId) }) } },
-            )
-        },
-    ) { padding ->
-        if (state?.loaded != true && messages.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
+    fun send() {
+        val text = draft.trim()
+        if (text.isEmpty() || pendingText != null) return
+        pendingText = text
+        draft = ""
+        stickToBottom = true
+        scope.launch {
+            val error = attempt { repository.sendPrompt(sessionId, text) }
+            if (error != null) {
+                draft = text
+                sendError = context.errorMessage(error)
             }
-            return@Scaffold
-        }
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (state?.hasMore == true) {
-                item(key = "older") {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        if (state.loadingHistory) {
-                            CircularProgressIndicator(Modifier.padding(8.dp))
-                        } else {
-                            TextButton(onClick = { repository.loadOlder() }) { Text(stringResource(R.string.session_load_older)) }
-                        }
-                    }
-                }
-            }
-            items(messages, key = { "m${it.seq}" }) { MessageRow(it, onHeightChanged = { layoutTick++ }) }
-            items(approvals, key = { "a${it.requestId}" }) { approval ->
-                ApprovalCard(approval, enabled = connected) { allow, onFailed ->
-                    scope.launch {
-                        val error = attempt { repository.respondApproval(approval.requestId, allow) }
-                        if (error != null) onFailed()
-                        report(error)
-                    }
-                }
-            }
-            items(questions, key = { "q${it.requestId}" }) { question ->
-                QuestionCard(question, enabled = connected) { answers, onFailed ->
-                    scope.launch {
-                        val error = attempt { repository.respondQuestion(question.requestId, answers) }
-                        if (error != null) onFailed()
-                        report(error)
-                    }
-                }
-            }
+            pendingText = null
         }
     }
-}
 
-@Composable
-private fun Composer(
-    text: String,
-    onTextChange: (String) -> Unit,
-    enabled: Boolean,
-    running: Boolean,
-    onSend: () -> Unit,
-    onStop: () -> Unit,
-) {
-    Surface(tonalElevation = 3.dp) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .imePadding()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = onTextChange,
-                placeholder = { Text(stringResource(R.string.composer_hint)) },
-                maxLines = 6,
-                modifier = Modifier.weight(1f),
-            )
-            if (running) {
-                IconButton(onClick = onStop, enabled = enabled) {
-                    Icon(Icons.Filled.Stop, contentDescription = stringResource(R.string.action_stop))
-                }
-            }
-            IconButton(onClick = onSend, enabled = enabled && text.isNotBlank()) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.action_send))
-            }
-        }
-    }
-}
-
-@Composable
-private fun MessageRow(message: MessageProjection, onHeightChanged: () -> Unit) {
-    when (message.role) {
-        "user" -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.widthIn(max = 320.dp),
+    Column(Modifier.fillMaxSize().background(p.background)) {
+        NavBar(
+            leading = { BackButton(onBack) },
+            trailing = {
+                BarIconButton(Icons.Outlined.AddComment, stringResource(R.string.a11y_new_session), onNewSession, enabled = connected)
+            },
+            principal = { ConnectionStatusTitle(title, connection) { repository.reconnect() } },
+        )
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                SelectionContainer {
-                    Text(message.text.orEmpty(), modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                if (state?.loadingHistory == true) {
+                    item(key = "older") {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { SmallSpinner() }
+                    }
+                }
+                if (rows.isEmpty() && pendingText == null) {
+                    item(key = "empty") {
+                        if (state?.loaded != true) ConversationSkeleton() else EmptyConversation()
+                    }
+                }
+                items(rows, key = { it.key }) { row -> TimelineRow(row) { layoutTick++ } }
+                pendingText?.let { text ->
+                    item(key = "pending") {
+                        TrailingBubble {
+                            UserBubble(text, null) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    SmallSpinner(size = 11.dp)
+                                    Text(stringResource(R.string.conversation_sending), style = AppType.caption, color = p.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                sendError?.let { error ->
+                    item(key = "send-error") {
+                        Text(
+                            error,
+                            style = AppType.footnote,
+                            color = p.danger,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.fillMaxWidth().plainClickable { sendError = null },
+                        )
+                    }
+                }
+            }
+
+            // Reopen a dismissed approval or question; floats above the timeline.
+            reopenId?.let { id ->
+                val approval = approvals.firstOrNull { it.requestId == id }
+                val question = questions.firstOrNull { it.requestId == id }
+                Box(Modifier.align(Alignment.TopCenter).padding(horizontal = 16.dp).padding(top = 4.dp)) {
+                    PendingReopenChip(
+                        approval = approval != null,
+                        headline = if (approval != null) stringResource(R.string.approval_title) else stringResource(R.string.question_title),
+                        subtitle = approval?.toolName?.ifBlank { null } ?: question?.questions?.firstOrNull()?.question,
+                    ) { dismissed = dismissed - id }
+                }
+            }
+
+            AnimatedVisibility(
+                visible = !atBottom,
+                enter = fadeIn() + scaleIn(initialScale = 0.9f),
+                exit = fadeOut() + scaleOut(targetScale = 0.9f),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 6.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .plainClickable {
+                            stickToBottom = true
+                            scope.launch {
+                                listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
+                                listState.scrollBy(1_000_000f)
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .background(p.background, CircleShape)
+                            .border(0.5.dp, p.hairline, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.KeyboardArrowDown,
+                            stringResource(R.string.a11y_jump_latest),
+                            tint = p.foreground,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
             }
         }
-        "tool" -> ToolRow(message)
-        "system", "error" -> Text(
-            message.text.orEmpty(),
-            style = MaterialTheme.typography.bodySmall,
-            color = if (message.role == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-        )
-        else -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            message.thinking?.takeIf { it.isNotBlank() }?.let { ThinkingBlock(it, message.streaming && message.text.isNullOrEmpty()) }
-            val text = message.text.orEmpty()
-            if (text.isNotEmpty() || (message.streaming && message.thinking.isNullOrEmpty())) {
-                MarkdownMessage(
-                    markdown = if (message.streaming) "$text▍" else text,
-                    key = message.seq,
-                    onHeightChanged = onHeightChanged,
-                )
-            }
-        }
-    }
-}
 
-@Composable
-private fun ThinkingBlock(text: String, streaming: Boolean) {
-    var expanded by remember { mutableStateOf(false) }
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(10.dp),
-        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
-    ) {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-            Text(
-                stringResource(if (streaming) R.string.message_thinking_live else R.string.message_thinking),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding()) {
+            PromptComposer(
+                draft = draft,
+                onDraftChange = {
+                    draft = it
+                    sendError = null
+                },
+                todoItems = summary?.todoItems.orEmpty(),
+                canSubmit = connected,
+                sending = pendingText != null,
+                running = running,
+                stopping = stopping,
+                onSend = ::send,
+                onStop = {
+                    stopping = true
+                    scope.launch {
+                        attempt { repository.cancelTurn(sessionId) }?.let { sendError = context.errorMessage(it) }
+                        stopping = false
+                    }
+                },
+                onOpenTodos = { showsTodos = true },
+                modifier = Modifier.padding(horizontal = 12.dp).padding(top = 6.dp),
             )
-            if (expanded || streaming) {
-                Text(
-                    text,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = if (expanded) Int.MAX_VALUE else 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Text(
+                stringResource(R.string.conversation_disclaimer),
+                style = AppType.caption2,
+                color = p.tertiary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 4.dp),
+            )
+        }
+    }
+
+    activeId?.let { id ->
+        fun respond(action: suspend () -> Unit) {
+            submitting = true
+            pendingError = null
+            scope.launch {
+                attempt { action() }?.let { pendingError = context.errorMessage(it) }
+                submitting = false
+            }
+        }
+        val approval: PendingApproval? = approvals.firstOrNull { it.requestId == id }
+        val question: PendingQuestion? = questions.firstOrNull { it.requestId == id }
+        if (approval != null) {
+            ApprovalSheet(
+                approval = approval,
+                submitting = submitting,
+                error = pendingError,
+                enabled = connected,
+                onRespond = { allow -> respond { repository.respondApproval(id, allow) } },
+                onDismiss = { dismissed = dismissed + id },
+            )
+        } else if (question != null) {
+            QuestionSheet(
+                payload = question,
+                submitting = submitting,
+                error = pendingError,
+                enabled = connected,
+                onSubmit = { answers -> respond { repository.respondQuestion(id, answers) } },
+                onDismiss = { dismissed = dismissed + id },
+            )
+        }
+    }
+
+    if (showsTodos) {
+        val todos = summary?.todoItems.orEmpty()
+        ConversationSheet(
+            title = stringResource(R.string.todo_detail_title),
+            subtitle = stringResource(R.string.todo_completed_progress, todos.count { it.status == "completed" }, todos.size),
+            onDismiss = { showsTodos = false },
+        ) { TodoListContent(todos) }
+    }
+}
+
+/** Title with the connection hint under it while not connected (iOS `ConnectionStatusTitle`). */
+@Composable
+private fun ConnectionStatusTitle(title: String, connection: ConnectionState, onRetry: () -> Unit) {
+    val p = palette
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(title, style = AppType.headline, color = p.foreground, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (connection !is ConnectionState.Authenticated) {
+            val (text, color) = when (connection) {
+                is ConnectionState.Connecting -> stringResource(R.string.offline_connecting) to p.warning
+                ConnectionState.Disconnected -> stringResource(R.string.offline_disconnected) to p.secondary
+                else -> stringResource(R.string.phase_failed) to p.danger
+            }
+            Row(
+                Modifier.plainClickable(enabled = connection is ConnectionState.Failed, onClick = onRetry),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Box(Modifier.size(5.dp).background(color, CircleShape))
+                Text(text, style = AppType.caption2.copy(fontWeight = FontWeight.Medium), color = color, maxLines = 1)
             }
         }
     }
 }
 
 @Composable
-private fun ToolRow(message: MessageProjection) {
-    val tool = message.tool
-    var expanded by remember { mutableStateOf(false) }
-    val color = when (tool?.state) {
-        "error" -> MaterialTheme.colorScheme.error
-        "running" -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    val marker = when (tool?.state) {
-        "running" -> "◌"
-        "error" -> "✕"
-        else -> "✓"
-    }
-    Column(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 4.dp)) {
-        Text(
-            "$marker ${tool?.name ?: "tool"}  ${tool?.summary.orEmpty()}",
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = color,
-            maxLines = if (expanded) Int.MAX_VALUE else 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (expanded && !message.text.isNullOrBlank()) {
-            SelectionContainer {
-                Text(message.text.orEmpty(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-            }
-        }
+private fun EmptyConversation() {
+    val p = palette
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 36.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(Icons.Outlined.ChatBubbleOutline, null, tint = p.muted, modifier = Modifier.size(30.dp))
+        Text(stringResource(R.string.empty_title), style = AppType.headline, color = p.foreground)
+        Text(stringResource(R.string.empty_subtitle), style = AppType.subheadline, color = p.secondary, textAlign = TextAlign.Center)
     }
 }
