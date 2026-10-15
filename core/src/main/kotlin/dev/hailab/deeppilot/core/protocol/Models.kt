@@ -1,5 +1,6 @@
 package dev.hailab.deeppilot.core.protocol
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
@@ -32,6 +33,7 @@ object FrameType {
     const val SESSION_EVENT = "s2c.session.event"
     const val SESSION_SEND_PROMPT = "c2s.session.sendPrompt"
     const val SESSION_CANCEL = "c2s.session.cancel"
+    const val SESSION_DELIVERY = "c2s.session.delivery"
 
     const val PENDING_APPROVAL = "s2c.pending.approval"
     const val PENDING_QUESTION = "s2c.pending.question"
@@ -49,6 +51,8 @@ object FrameType {
     const val SESSION_CREATE = "c2s.session.create"
     const val SESSION_RENAME = "c2s.session.rename"
     const val SESSION_ARCHIVE = "c2s.session.archive"
+    const val SESSIONS_ARCHIVED = "c2s.sessions.archived"
+    const val SESSION_UNARCHIVE = "c2s.session.unarchive"
 
     const val SESSION_MODELS = "c2s.session.models"
     const val SESSION_SELECT_MODEL = "c2s.session.selectModel"
@@ -56,6 +60,17 @@ object FrameType {
     const val DIRECTORY_LIST = "c2s.directory.list"
     const val DIRECTORY_PICK = "c2s.directory.pick"
     const val WORKSPACE_CREATE = "c2s.workspace.create"
+
+    const val SESSION_RENAMED = "s2c.session.renamed"
+    const val SESSION_ARCHIVED = "s2c.session.archived"
+    const val SESSION_FORK = "c2s.session.fork"
+
+    const val SCHEDULE_LIST = "c2s.schedule.list"
+    const val SCHEDULE_HISTORY = "c2s.schedule.history"
+    const val SCHEDULE_CREATE = "c2s.schedule.create"
+    const val SCHEDULE_UPDATE = "c2s.schedule.update"
+    const val SCHEDULE_DELETE = "c2s.schedule.delete"
+    const val SCHEDULE_CHANGED = "s2c.schedule.changed"
 }
 
 /** Device scopes requested at pairing; the product grants all of them (§2.2). */
@@ -178,6 +193,10 @@ data class SessionSummary(
 @Serializable
 data class SessionsSnapshot(val full: Boolean = true, val sessions: List<SessionSummary> = emptyList())
 
+/** Answer to `c2s.sessions.archived` (§4c); rows never appear in the live list. */
+@Serializable
+data class ArchivedSessionsSnapshot(val sessions: List<SessionSummary> = emptyList())
+
 @Serializable
 data class SessionsDelta(
     val upserted: List<SessionSummary> = emptyList(),
@@ -291,7 +310,22 @@ data class SendPrompt(
     val text: String,
     val images: List<PromptImage>? = null,
     val documents: List<PromptDocument>? = null,
+    /** Stable send identity when the bridge advertises `promptDelivery` (§10). */
+    val clientSendId: String? = null,
 )
+
+/** `s2c.ack` for a prompt sent with a clientSendId, and the `c2s.session.delivery` answer. */
+@Serializable
+data class PromptReceipt(
+    val clientSendId: String = "",
+    /** accepted | rejected | unknown | notFound | expired */
+    val status: String = "unknown",
+    val userSeq: Long? = null,
+    val code: String? = null,
+)
+
+@Serializable
+data class PromptDeliveryQuery(val sessionId: String, val clientSendId: String)
 
 // ---------- pending interactions ----------
 
@@ -487,3 +521,140 @@ data class WorkspaceCreate(val path: String)
 
 @Serializable
 data class WorkspaceCreated(val workspace: Workspace, val created: Boolean = false)
+
+// ---------- session fork (optional v2 extension) ----------
+
+/** Idempotency key for mutating requests: epoch millis and a lowercase UUID, as on iOS. */
+object ClientRequestId {
+    fun make(nowMillis: Long = System.currentTimeMillis()): String =
+        "$nowMillis-${java.util.UUID.randomUUID().toString().lowercase()}"
+}
+
+@Serializable
+data class SessionFork(val clientRequestId: String, val sessionId: String, val atSeq: Long? = null)
+
+@Serializable
+data class SessionForked(
+    val clientRequestId: String? = null,
+    val sourceSessionId: String? = null,
+    val sessionId: String = "",
+    val atSeq: Double? = null,
+    val replayed: Boolean = false,
+)
+
+// ---------- schedules (optional v2 extension) ----------
+
+/** One DSH Schedule task. [kind] is after | at | every | daily | weekly | cron. */
+@Serializable
+data class ScheduleTask(
+    val id: String,
+    val kind: String = "after",
+    val title: String = "",
+    val prompt: String = "",
+    val scheduledAt: String = "",
+    val state: String = "",
+    val deliveryMode: String = "",
+    val afterSeconds: Double? = null,
+    val everySeconds: Double? = null,
+    val time: String? = null,
+    val timeZone: String? = null,
+    val weekdays: List<Int>? = null,
+    val expression: String? = null,
+)
+
+/** The last-read record sent with an update so the host can refuse a stale edit. */
+@Serializable
+data class ScheduleExpected(
+    val id: String,
+    val kind: String,
+    val title: String,
+    val prompt: String,
+    val scheduledAt: String,
+    val afterSeconds: Double? = null,
+    val everySeconds: Double? = null,
+    val time: String? = null,
+    val timeZone: String? = null,
+    val weekdays: List<Int>? = null,
+    val expression: String? = null,
+) {
+    companion object {
+        fun of(task: ScheduleTask) = ScheduleExpected(
+            task.id, task.kind, task.title, task.prompt, task.scheduledAt,
+            task.afterSeconds, task.everySeconds, task.time, task.timeZone, task.weekdays, task.expression,
+        )
+    }
+}
+
+@Serializable
+data class ScheduleListRequest(val sessionId: String)
+
+@Serializable
+data class ScheduleSnapshot(val sessionId: String = "", val tasks: List<ScheduleTask> = emptyList())
+
+@Serializable
+data class ScheduleHistoryRequest(val sessionId: String, val id: String, val limit: Int = 20, val before: String? = null)
+
+@Serializable
+data class ScheduleHistoryRecord(
+    val scheduledAt: String = "",
+    val deliveredAt: String = "",
+    val messageId: String = "",
+    val prompt: String? = null,
+)
+
+@Serializable
+data class ScheduleHistory(
+    val id: String = "",
+    val records: List<ScheduleHistoryRecord> = emptyList(),
+    val earlierRecordsUnavailable: Boolean = false,
+    val nextBefore: String? = null,
+)
+
+@Serializable
+data class ScheduleHistoryPayload(val sessionId: String = "", val history: ScheduleHistory = ScheduleHistory())
+
+@Serializable
+data class ScheduleClock(
+    val time: String,
+    @SerialName("time_zone") val timeZone: String,
+    val weekdays: List<Int>? = null,
+)
+
+@Serializable
+data class ScheduleCron(val expression: String, @SerialName("time_zone") val timeZone: String)
+
+/** `c2s.schedule.create`: a title, a prompt and exactly one selector. */
+@Serializable
+data class ScheduleCreate(
+    val clientRequestId: String,
+    val sessionId: String,
+    val title: String,
+    val prompt: String,
+    @SerialName("after_seconds") val afterSeconds: Long? = null,
+    @SerialName("every_seconds") val everySeconds: Long? = null,
+    val daily: ScheduleClock? = null,
+    val weekly: ScheduleClock? = null,
+    val cron: ScheduleCron? = null,
+)
+
+@Serializable
+data class ScheduleUpdate(
+    val clientRequestId: String,
+    val sessionId: String,
+    val id: String,
+    val expected: ScheduleExpected,
+    val title: String? = null,
+    val prompt: String? = null,
+)
+
+@Serializable
+data class ScheduleDelete(val clientRequestId: String, val sessionId: String, val id: String)
+
+@Serializable
+data class ScheduleUpdated(
+    val clientRequestId: String = "",
+    val sessionId: String = "",
+    val task: ScheduleTask? = null,
+    val deleted: Boolean = false,
+    val replayed: Boolean = false,
+)

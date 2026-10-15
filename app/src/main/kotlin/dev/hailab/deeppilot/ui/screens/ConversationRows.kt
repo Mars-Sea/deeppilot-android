@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.CallSplit
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -40,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
@@ -69,23 +71,36 @@ import dev.hailab.deeppilot.ui.components.SmallSpinner
 import dev.hailab.deeppilot.ui.components.plainClickable
 import dev.hailab.deeppilot.ui.markdown.MarkdownMessage
 import dev.hailab.deeppilot.ui.palette
-import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** One timeline row, as iOS `ConversationTimelineRows` renders it. */
 @Composable
-fun TimelineRow(item: TimelineItem, sessionId: String, repository: BridgeRepository, onHeightChanged: () -> Unit) {
+fun TimelineRow(
+    item: TimelineItem,
+    sessionId: String,
+    repository: BridgeRepository,
+    onFork: (suspend (Long) -> Unit)? = null,
+    onHeightChanged: () -> Unit,
+) {
     when (item) {
-        is TimelineItem.Message -> MessageRow(item.message, sessionId, repository, onHeightChanged)
+        is TimelineItem.Message -> MessageRow(item.message, sessionId, repository, onFork, onHeightChanged)
         is TimelineItem.Activity -> TimelineActivityRow(item.entries)
         is TimelineItem.SystemContext -> SystemContextRow(item.messages)
     }
 }
 
 @Composable
-private fun MessageRow(message: MessageProjection, sessionId: String, repository: BridgeRepository, onHeightChanged: () -> Unit) {
+private fun MessageRow(
+    message: MessageProjection,
+    sessionId: String,
+    repository: BridgeRepository,
+    onFork: (suspend (Long) -> Unit)?,
+    onHeightChanged: () -> Unit,
+) {
     val p = palette
     when (message.role) {
         "user" -> TrailingBubble { UserBubble(Timeline.displayText(message), message.attachments, sessionId, repository) }
@@ -108,7 +123,7 @@ private fun MessageRow(message: MessageProjection, sessionId: String, repository
                         Text(stringResource(R.string.conversation_generating), style = AppType.caption, color = p.secondary)
                     }
                 } else {
-                    AssistantActionRow(text)
+                    AssistantActionRow(text, onFork?.let { fork -> { fork(message.seq) } })
                 }
             }
         }
@@ -211,12 +226,18 @@ private fun DocumentAttachmentChip(attachment: MessageAttachment) {
     }
 }
 
-/** Copy and share under a finished answer (44×44 targets, secondary color). */
+/**
+ * Copy, share and (when the host supports it) branch under a finished answer
+ * (44×44 targets, secondary color). [onFork] null hides the branch button.
+ */
 @Composable
-private fun AssistantActionRow(text: String) {
+private fun AssistantActionRow(text: String, onFork: (suspend () -> Unit)?) {
     val p = palette
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
+    // The host round trip takes seconds; show it so the tap doesn't look ignored.
+    var forking by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
             delay(1400)
@@ -247,6 +268,25 @@ private fun AssistantActionRow(text: String) {
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.Outlined.IosShare, contentDescription = shareLabel, tint = p.secondary, modifier = Modifier.size(18.dp))
+        }
+        if (onFork != null) {
+            val forkLabel = stringResource(if (forking) R.string.schedule_fork_in_progress else R.string.schedule_fork)
+            Box(
+                Modifier.size(44.dp).plainClickable(enabled = !forking) {
+                    forking = true
+                    scope.launch {
+                        try {
+                            onFork()
+                        } finally {
+                            forking = false
+                        }
+                    }
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (forking) SmallSpinner()
+                else Icon(Icons.AutoMirrored.Outlined.CallSplit, contentDescription = forkLabel, tint = p.secondary, modifier = Modifier.size(18.dp))
+            }
         }
     }
 }

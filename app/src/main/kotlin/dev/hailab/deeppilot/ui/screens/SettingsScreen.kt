@@ -84,7 +84,13 @@ import dev.hailab.deeppilot.ui.palette
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen(repository: BridgeRepository, onBack: () -> Unit, onPairAnother: () -> Unit) {
+fun SettingsScreen(
+    repository: BridgeRepository,
+    onBack: () -> Unit,
+    onPairAnother: () -> Unit,
+    onOpenIcons: () -> Unit,
+    onOpenArchived: () -> Unit,
+) {
     val p = palette
     val context = LocalContext.current
     val host by repository.host.collectAsStateWithLifecycle()
@@ -190,6 +196,14 @@ fun SettingsScreen(repository: BridgeRepository, onBack: () -> Unit, onPairAnoth
             }
 
             AppearanceCard()
+
+            SettingsCard {
+                SettingsRow(title = stringResource(R.string.settings_icon_title), onClick = onOpenIcons) { Chevron() }
+            }
+
+            SettingsCard {
+                SettingsRow(title = stringResource(R.string.archived_title), onClick = onOpenArchived) { Chevron() }
+            }
 
             // Background connection and notifications (Android has no APNs; see the push plan).
             Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.small)) {
@@ -393,7 +407,7 @@ private fun <T> SegmentedControl(
 
 /** iOS `Menu` with the current value and an up/down chevron; the chosen item carries a check. */
 @Composable
-private fun <T> MenuPicker(options: List<T>, selected: T, label: @Composable (T) -> String, onSelect: (T) -> Unit) {
+internal fun <T> MenuPicker(options: List<T>, selected: T, label: @Composable (T) -> String, onSelect: (T) -> Unit) {
     val p = palette
     var open by remember { mutableStateOf(false) }
     Box {
@@ -433,7 +447,7 @@ private fun StatusText(text: String, color: Color) {
 }
 
 @Composable
-private fun Chevron() {
+internal fun Chevron() {
     Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = palette.tertiary, modifier = Modifier.size(18.dp))
 }
 

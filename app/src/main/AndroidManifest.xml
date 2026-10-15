@@ -35,10 +35,6 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <!-- deeppilot://pair?h=…&c=… : the copyable pairing text (PROTOCOL.md §2.1). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -47,6 +43,31 @@
                 <data android:scheme="deeppilot" android:host="pair" />
             </intent-filter>
         </activity>
+
+        <!-- Home-screen entries, one per app icon (iOS alternate icons). Settings enables
+             exactly one of them; the default stays enabled on a fresh install. -->
+        <activity-alias
+            android:name=".IconDefault"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:targetActivity=".ui.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconFlow"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flow"
+            android:targetActivity=".ui.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <!-- Lets the system camera app write a photo for a prompt attachment. -->
         <provider

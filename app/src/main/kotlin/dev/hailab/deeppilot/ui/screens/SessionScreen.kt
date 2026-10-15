@@ -30,14 +30,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.AddComment
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,24 +61,28 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.core.content.ContextCompat
-import dev.hailab.deeppilot.attachments.AttachmentIngest
-import dev.hailab.deeppilot.attachments.CameraFiles
-import dev.hailab.deeppilot.core.attachments.PromptAttachment
-import dev.hailab.deeppilot.core.protocol.ModelSelection
-import dev.hailab.deeppilot.core.protocol.SessionModels
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.hailab.deeppilot.R
+import dev.hailab.deeppilot.attachments.AttachmentIngest
+import dev.hailab.deeppilot.attachments.CameraFiles
 import dev.hailab.deeppilot.bridge.BridgeRepository
+import dev.hailab.deeppilot.bridge.PromptUnconfirmedException
+import dev.hailab.deeppilot.core.attachments.PromptAttachment
 import dev.hailab.deeppilot.core.bridge.ConnectionState
+import dev.hailab.deeppilot.core.delivery.PendingSend
+import dev.hailab.deeppilot.core.protocol.ModelSelection
 import dev.hailab.deeppilot.core.protocol.PendingApproval
 import dev.hailab.deeppilot.core.protocol.PendingQuestion
+import dev.hailab.deeppilot.core.protocol.SessionModels
 import dev.hailab.deeppilot.core.session.Timeline
+import dev.hailab.deeppilot.ui.AppRadius
 import dev.hailab.deeppilot.ui.AppType
 import dev.hailab.deeppilot.ui.attempt
 import dev.hailab.deeppilot.ui.components.BackButton
@@ -93,6 +101,7 @@ fun SessionScreen(
     sessionId: String,
     onBack: () -> Unit,
     onNewSession: () -> Unit,
+    onOpenSession: (String) -> Unit,
 ) {
     DisposableEffect(sessionId) {
         repository.openSession(sessionId)
@@ -122,6 +131,23 @@ fun SessionScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var showsTodos by remember { mutableStateOf(false) }
+    var showsSchedules by remember { mutableStateOf(false) }
+    val allPendingSends by repository.pendingSends.collectAsStateWithLifecycle()
+    val pendingSends = allPendingSends.filter { it.sessionId == sessionId }
+    // While an unconfirmed send is on screen, ask the host about it every few seconds.
+    val awaitingReceipts = pendingSends.any { it.delivery != PendingSend.Delivery.Rejected }
+    LaunchedEffect(sessionId, connected, awaitingReceipts) {
+        while (connected && awaitingReceipts) {
+            repository.reconcileDeliveries()
+            delay(5_000)
+        }
+    }
+    val capabilities by repository.capabilities.collectAsStateWithLifecycle()
+    val supportsSchedules = capabilities?.schedules == true
+    val supportsFork = capabilities?.sessionFork == true
+    LaunchedEffect(sessionId, connected, supportsSchedules) {
+        if (connected && supportsSchedules) repository.loadSchedules(sessionId)
+    }
 
     // Pending approval/question half sheet, with a chip to bring back a dismissed one.
     var dismissed by remember(sessionId) { mutableStateOf(setOf<String>()) }
@@ -166,6 +192,14 @@ fun SessionScreen(
     var pendingAttachments by remember { mutableStateOf<List<PromptAttachment>>(emptyList()) }
     var importing by remember { mutableIntStateOf(0) }
     var alert by remember { mutableStateOf<Pair<String, String>?>(null) }
+
+    // Branch at an answer and open the new session; the button owns its spinner.
+    suspend fun fork(atSeq: Long) {
+        var newId: String? = null
+        val error = attempt { newId = repository.forkSession(sessionId, atSeq) }
+        if (error != null) alert = context.getString(R.string.schedule_fork_failed) to context.errorMessage(error)
+        else newId?.let(onOpenSession)
+    }
     val capabilityTitle = stringResource(R.string.composer_capability_title)
     val ingest = remember { AttachmentIngest(context.applicationContext) }
     var showsAttachmentSheet by remember { mutableStateOf(false) }
@@ -218,7 +252,6 @@ fun SessionScreen(
     }
 
     // Model catalog for this session (§4), loaded once connected and supported.
-    val capabilities by repository.capabilities.collectAsStateWithLifecycle()
     var models by remember(sessionId) { mutableStateOf<SessionModels?>(null) }
     var modelsLoading by remember { mutableStateOf(false) }
     var modelsError by remember { mutableStateOf<String?>(null) }
@@ -265,7 +298,11 @@ fun SessionScreen(
         stickToBottom = true
         scope.launch {
             val error = attempt { repository.sendPrompt(sessionId, text, outgoing) }
-            if (error != null) {
+            if (error is PromptUnconfirmedException) {
+                // The host may have it: keep the marker in the timeline and leave the
+                // composer empty so the same prompt is not sent twice.
+                alert = context.getString(R.string.delivery_unconfirmed_title) to context.errorMessage(error)
+            } else if (error != null) {
                 // Put the draft back unless something new was typed meanwhile.
                 if (draft.isBlank() && attachments.isEmpty()) {
                     draft = text
@@ -285,6 +322,9 @@ fun SessionScreen(
             leading = { BackButton(onBack) },
             trailing = {
                 BarIconButton(Icons.Outlined.AddComment, stringResource(R.string.a11y_new_session), onNewSession, enabled = connected)
+                if (supportsSchedules) {
+                    BarIconButton(Icons.Outlined.History, stringResource(R.string.schedule_title), { showsSchedules = true })
+                }
             },
             principal = { ConnectionStatusTitle(title, connection) { repository.reconnect() } },
         )
@@ -300,12 +340,21 @@ fun SessionScreen(
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { SmallSpinner() }
                     }
                 }
-                if (rows.isEmpty() && pendingText == null) {
+                if (rows.isEmpty() && pendingText == null && pendingSends.isEmpty()) {
                     item(key = "empty") {
                         if (state?.loaded != true) ConversationSkeleton() else EmptyConversation()
                     }
                 }
-                items(rows, key = { it.key }) { row -> TimelineRow(row, sessionId, repository) { layoutTick++ } }
+                items(rows, key = { it.key }) { row ->
+                    TimelineRow(row, sessionId, repository, onFork = if (supportsFork) ::fork else null) { layoutTick++ }
+                }
+                // Sends from earlier that the host never confirmed (the in-flight one is below).
+                items(
+                    pendingSends.filter { it.delivery != PendingSend.Delivery.Sending || pendingText == null },
+                    key = { "outbox-${it.clientSendId}" },
+                ) { pending ->
+                    PendingSendBubble(pending) { repository.dismissPendingSend(pending.clientSendId) }
+                }
                 pendingText?.let { text ->
                     item(key = "pending") {
                         TrailingBubble {
@@ -520,6 +569,10 @@ fun SessionScreen(
         )
     }
 
+    if (showsSchedules) {
+        ScheduleListSheet(repository = repository, sessionId = sessionId, onDismiss = { showsSchedules = false })
+    }
+
     if (showsTodos) {
         val todos = summary?.todoItems.orEmpty()
         ConversationSheet(
@@ -565,5 +618,54 @@ private fun EmptyConversation() {
         Icon(Icons.Outlined.ChatBubbleOutline, null, tint = p.muted, modifier = Modifier.size(30.dp))
         Text(stringResource(R.string.empty_title), style = AppType.headline, color = p.foreground)
         Text(stringResource(R.string.empty_subtitle), style = AppType.subheadline, color = p.secondary, textAlign = TextAlign.Center)
+    }
+}
+
+/** iOS `pendingSendRow`: a prompt the host has not confirmed, with a way to retire the marker. */
+@Composable
+private fun PendingSendBubble(pending: PendingSend, onDismiss: () -> Unit) {
+    val p = palette
+    TrailingBubble {
+        Column(
+            Modifier
+                .background(p.secondaryFill, RoundedCornerShape(AppRadius.large))
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (pending.text.isNotEmpty()) Text(pending.text, style = AppType.body, color = p.foreground)
+            if (pending.attachmentCount > 0) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Outlined.AttachFile, null, tint = p.foreground, modifier = Modifier.size(14.dp))
+                    Text(
+                        pluralStringResource(R.plurals.delivery_attachments, pending.attachmentCount, pending.attachmentCount),
+                        style = AppType.footnote.copy(fontWeight = FontWeight.Medium),
+                        color = p.foreground,
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (pending.delivery == PendingSend.Delivery.Sending) {
+                    SmallSpinner(size = 11.dp)
+                    Text(stringResource(R.string.conversation_sending), style = AppType.caption, color = p.secondary)
+                } else {
+                    Icon(Icons.AutoMirrored.Outlined.HelpOutline, null, tint = p.secondary, modifier = Modifier.size(13.dp))
+                    Text(
+                        stringResource(if (pending.delivery == PendingSend.Delivery.Rejected) R.string.delivery_rejected else R.string.delivery_unknown),
+                        style = AppType.caption,
+                        color = p.secondary,
+                    )
+                }
+            }
+            if (pending.delivery != PendingSend.Delivery.Sending) {
+                // Never retried automatically, so the user must be able to retire it.
+                Text(
+                    stringResource(if (pending.delivery == PendingSend.Delivery.Rejected) R.string.delivery_dismiss else R.string.delivery_acknowledge),
+                    style = AppType.caption,
+                    color = p.accent,
+                    modifier = Modifier.plainClickable(onClick = onDismiss),
+                )
+            }
+        }
     }
 }
