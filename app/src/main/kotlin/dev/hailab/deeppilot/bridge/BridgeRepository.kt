@@ -10,7 +10,10 @@ import dev.hailab.deeppilot.core.bridge.BridgeException
 import dev.hailab.deeppilot.core.bridge.ConnectionState
 import dev.hailab.deeppilot.core.bridge.HostCredentials
 import dev.hailab.deeppilot.core.bridge.NotConnectedException
+import dev.hailab.deeppilot.core.cache.ConversationRetention
 import dev.hailab.deeppilot.core.delivery.PendingSend
+import dev.hailab.deeppilot.core.hosts.HostProfile
+import dev.hailab.deeppilot.core.hosts.HostRoster
 import dev.hailab.deeppilot.core.delivery.PromptOutbox
 import dev.hailab.deeppilot.core.pairing.PairingClient
 import dev.hailab.deeppilot.core.pairing.PairingLink
@@ -76,7 +79,9 @@ import dev.hailab.deeppilot.core.session.NotificationDeduper
 import dev.hailab.deeppilot.core.session.OpenSession
 import dev.hailab.deeppilot.core.session.SessionList
 import dev.hailab.deeppilot.core.session.SessionReducer
+import dev.hailab.deeppilot.data.ConversationCache
 import dev.hailab.deeppilot.data.DeviceIdentity
+import dev.hailab.deeppilot.data.DraftStore
 import dev.hailab.deeppilot.data.InstanceStore
 import dev.hailab.deeppilot.data.PromptOutboxStore
 import dev.hailab.deeppilot.notify.Notifier
@@ -86,7 +91,9 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -112,6 +119,8 @@ class BridgeRepository(
     private val scope: CoroutineScope,
     private val images: AttachmentImages,
     private val outbox: PromptOutboxStore,
+    private val drafts: DraftStore,
+    private val cache: ConversationCache,
 ) {
     val connection: StateFlow<ConnectionState> = client.state
 
@@ -145,9 +154,20 @@ class BridgeRepository(
     private val inFlightSends = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var reconciling = false
 
+    private val _roster = MutableStateFlow(store.loadRoster())
+    /** Every paired computer; [host] is the one connected (iOS `InstanceManager`). */
+    val roster: StateFlow<HostRoster> = _roster.asStateFlow()
+
+    /** Debounced offline-cache writes, per conversation, so streaming does not write per token. */
+    private val conversationSaves = ConcurrentHashMap<String, Job>()
+    @Volatile private var sessionsSave: Job? = null
+
     private val deduper = NotificationDeduper()
 
     fun start() {
+        drafts.bind(_host.value?.profileId)
+        _host.value?.let { restoreSessions(it.profileId) }
+
         scope.launch { client.frames.collect { handle(it) } }
         scope.launch {
             client.state.collect { state ->
@@ -161,10 +181,14 @@ class BridgeRepository(
         _host.value?.let { client.start(it) }
     }
 
-    // ---------- pairing ----------
+    // ---------- hosts ----------
 
-    /** Pairs with the host in [link] and connects. Throws PairingFailure / PairingException. */
-    suspend fun pair(link: PairingLink) {
+    /**
+     * Pairs with the host in [link]. A new host joins the list and is connected
+     * only when no other host is; [replacing] re-pairs that host in place, keeping
+     * its name and position. Throws PairingFailure / PairingException.
+     */
+    suspend fun pair(link: PairingLink, name: String = "", replacing: String? = null) {
         val profileId = UUID.randomUUID().toString()
         val publicKey = withContext(Dispatchers.IO) { keys.create(profileId) }
         val paired = try {
@@ -173,45 +197,153 @@ class BridgeRepository(
             keys.delete(profileId)
             throw e
         }
-        // Phase 1 keeps one host: pairing again replaces the previous one locally.
-        _host.value?.let { forget(it) }
-        val credentials = HostCredentials(
-            profileId = profileId,
+        val roster = _roster.value
+        // Pairing the same computer again (same audience) re-pairs it instead of listing it twice.
+        val old = replacing?.let { id -> roster.profiles.firstOrNull { it.id == id } }
+            ?: roster.profiles.firstOrNull { it.audience == paired.audience }
+        val profile = HostProfile(
+            id = profileId,
+            name = HostRoster.displayName(name.ifBlank { old?.name.orEmpty() }),
             host = paired.host,
             deviceId = paired.deviceId,
             audience = paired.audience,
             tlsFingerprint = paired.tlsFingerprint,
         )
-        store.saveHost(credentials)
-        _host.value = credentials
-        _pendingSends.value = emptyList()
-        client.start(credentials)
+        if (old == null) {
+            val next = roster.adding(profile)
+            if (roster.activeId == null) switchTo(next) else commitRoster(next)
+            return
+        }
+        // The old pairing is dead or about to be: drop its key and local data, keep its slot.
+        val next = roster.copy(
+            profiles = roster.profiles.map { if (it.id == old.id) profile else it },
+            activeId = roster.activeId?.let { if (it == old.id) profile.id else it },
+            launchId = roster.launchId?.let { if (it == old.id) profile.id else it },
+        )
+        if (roster.activeId == old.id) switchTo(next) else commitRoster(next)
+        discardLocalData(old.id)
     }
 
-    /** Revokes this device on the host when it supports that, then forgets the host. */
-    suspend fun unpair() {
-        val current = _host.value ?: return
-        if (connection.value is ConnectionState.Authenticated && _capabilities.value?.deviceRevoke == true) {
+    /** Connects to another paired host; everything shown switches with it. */
+    fun selectHost(id: String) {
+        if (id == _host.value?.profileId) return
+        val next = _roster.value.selecting(id)
+        if (next.activeId == id) switchTo(next)
+    }
+
+    fun renameHost(id: String, name: String) = commitRoster(_roster.value.renaming(id, name))
+
+    fun setLaunchHost(id: String) = commitRoster(_roster.value.settingLaunch(id))
+
+    /**
+     * Forgets a host: the device is revoked on it when it is connected and supports
+     * that, then its key and everything cached for it are deleted.
+     */
+    suspend fun deleteHost(id: String) {
+        val roster = _roster.value
+        if (roster.profiles.none { it.id == id }) return
+        val active = id == _host.value?.profileId
+        if (active && connection.value is ConnectionState.Authenticated && _capabilities.value?.deviceRevoke == true) {
             runCatching { client.request(FrameType.DEVICE_REVOKE, timeoutMillis = 5_000) }
         }
-        forget(current)
+        val next = roster.removing(id)
+        if (active) switchTo(next) else commitRoster(next)
+        discardLocalData(id)
     }
 
-    private fun forget(credentials: HostCredentials) {
-        client.stop()
-        keys.delete(credentials.profileId)
-        store.clearHost(credentials.profileId)
-        _host.value = null
+    /** Forgets the connected host. */
+    suspend fun unpair() {
+        _host.value?.let { deleteHost(it.profileId) }
+    }
+
+    private fun discardLocalData(profileId: String) {
+        keys.delete(profileId)
+        store.clearCursor(profileId)
+        outbox.clear(profileId)
+        drafts.remove(profileId)
+        scope.launch {
+            cache.remove(profileId)
+            images.clear(profileId)
+        }
+    }
+
+    private fun commitRoster(next: HostRoster) {
+        store.saveRoster(next)
+        _roster.value = next
+    }
+
+    /** Disconnects, clears what belonged to the previous host and connects [next]'s active host. */
+    private fun switchTo(next: HostRoster) {
+        sessionsSave?.cancel()
+        conversationSaves.values.forEach { it.cancel() }
+        conversationSaves.clear()
+        visibility.setViewingSession(null)
         _capabilities.value = null
         _sessions.value = emptyList()
         _approvals.value = emptyList()
         _questions.value = emptyList()
         _openSession.value = null
         _schedules.value = null
-        outbox.clear(credentials.profileId)
-        _pendingSends.value = emptyList()
         notifier.cancelAll()
-        scope.launch { images.clear(credentials.profileId) }
+        commitRoster(next)
+        val credentials = next.active?.credentials()
+        _host.value = credentials
+        drafts.bind(credentials?.profileId)
+        _pendingSends.value = credentials?.let { outbox.load(it.profileId) }.orEmpty()
+        // start() closes the previous socket itself; a separate stop() could land after it.
+        if (credentials == null) {
+            client.stop()
+        } else {
+            restoreSessions(credentials.profileId)
+            client.start(credentials)
+        }
+    }
+
+    // ---------- drafts and offline cache ----------
+
+    /** The unsent composer text of [sessionId] on the connected host. */
+    fun draft(sessionId: String): String = drafts.text(sessionId)
+
+    fun saveDraft(sessionId: String, text: String) = drafts.set(sessionId, text)
+
+    /** Shows the cached session list until the host sends its own. */
+    private fun restoreSessions(profileId: String) {
+        scope.launch {
+            val cached = cache.loadSessions(profileId)
+            if (cached.isEmpty()) return@launch
+            _sessions.update { current -> if (current.isEmpty() && _host.value?.profileId == profileId) cached else current }
+        }
+    }
+
+    /** Paints a conversation from the cache while the host's tail is on its way, or offline. */
+    private fun restoreConversation(profileId: String, sessionId: String) {
+        scope.launch {
+            val cached = cache.loadConversation(profileId, sessionId) ?: return@launch
+            _openSession.update { open ->
+                if (open == null || open.sessionId != sessionId || open.messages.isNotEmpty() || _host.value?.profileId != profileId) open
+                else open.copy(messages = cached.messages, hasMore = cached.hasMore, loaded = true)
+            }
+        }
+    }
+
+    private fun persistSessions() {
+        val profileId = _host.value?.profileId ?: return
+        sessionsSave?.cancel()
+        sessionsSave = scope.launch {
+            delay(CACHE_WRITE_DELAY_MILLIS)
+            if (_host.value?.profileId == profileId) cache.saveSessions(profileId, _sessions.value)
+        }
+    }
+
+    private fun persistConversation(sessionId: String) {
+        val profileId = _host.value?.profileId ?: return
+        conversationSaves.remove(sessionId)?.cancel()
+        conversationSaves[sessionId] = scope.launch {
+            delay(CACHE_WRITE_DELAY_MILLIS)
+            val open = _openSession.value?.takeIf { it.sessionId == sessionId } ?: return@launch
+            if (_host.value?.profileId != profileId || open.messages.isEmpty()) return@launch
+            cache.saveConversation(profileId, ConversationRetention.snapshot(open))
+        }
     }
 
     fun reconnect() = client.forceReconnect()
@@ -234,6 +366,7 @@ class BridgeRepository(
         if (_openSession.value?.sessionId != sessionId) {
             val running = _sessions.value.firstOrNull { it.id == sessionId }?.status == "running"
             _openSession.value = OpenSession(sessionId, turnRunning = running)
+            _host.value?.let { restoreConversation(it.profileId, sessionId) }
         }
         scope.launch { client.send(FrameType.SESSION_OPEN, SessionOpen.serializer(), SessionOpen(sessionId, TAIL_COUNT)) }
     }
@@ -454,12 +587,14 @@ class BridgeRepository(
         // The host may normalize the name; show what it accepted.
         val accepted = reply.decode(SessionRenamed.serializer())?.title?.takeIf { it.isNotEmpty() } ?: title
         _sessions.update { list -> list.map { if (it.id == sessionId) it.copy(title = accepted) else it } }
+        persistSessions()
     }
 
     suspend fun archiveSession(sessionId: String) {
         requireAuthenticated()
         client.request(FrameType.SESSION_ARCHIVE, SessionRef.serializer(), SessionRef(sessionId))
         _sessions.update { list -> list.filterNot { it.id == sessionId } }
+        persistSessions()
     }
 
     /** Archived rows, fetched on demand for the archived screen (§4c). */
@@ -588,9 +723,11 @@ class BridgeRepository(
                 val id = renamed.sessionId ?: return@let
                 val title = renamed.title ?: return@let
                 _sessions.update { list -> list.map { if (it.id == id) it.copy(title = title) else it } }
+                persistSessions()
             }
             FrameType.SESSION_ARCHIVED -> envelope.decode(SessionRef.serializer())?.let { archived ->
                 _sessions.update { list -> list.filterNot { it.id == archived.sessionId } }
+                persistSessions()
             }
             FrameType.SESSIONS_SNAPSHOT -> envelope.decode(SessionsSnapshot.serializer())?.let { snapshot ->
                 _sessions.update { current ->
@@ -598,10 +735,12 @@ class BridgeRepository(
                     else SessionList.applyDelta(current, SessionsDelta(upserted = snapshot.sessions))
                 }
                 syncTurnRunning()
+                persistSessions()
             }
             FrameType.SESSIONS_DELTA -> envelope.decode(SessionsDelta.serializer())?.let { delta ->
                 _sessions.update { SessionList.applyDelta(it, delta) }
                 syncTurnRunning()
+                persistSessions()
             }
             FrameType.SESSION_TAIL -> envelope.decode(SessionTail.serializer())?.let { tail ->
                 _openSession.update { open ->
@@ -612,6 +751,7 @@ class BridgeRepository(
                         loaded = true,
                     )
                 }
+                persistConversation(tail.sessionId)
             }
             FrameType.HISTORY_PAGE -> envelope.decode(HistoryPage.serializer())?.let { page ->
                 _openSession.update { open ->
@@ -622,12 +762,14 @@ class BridgeRepository(
                         loadingHistory = false,
                     )
                 }
+                persistConversation(page.sessionId)
             }
             FrameType.SESSION_EVENT -> envelope.decode(SessionEvent.serializer())?.let { event ->
                 _openSession.update { open ->
                     if (open == null || open.sessionId != event.sessionId) open
                     else SessionReducer.reduce(open, event).state
                 }
+                persistConversation(event.sessionId)
             }
             FrameType.PENDING_APPROVAL -> envelope.decode(PendingApproval.serializer())?.let { approval ->
                 _approvals.update { list -> list.filterNot { it.requestId == approval.requestId } + approval }
@@ -695,6 +837,7 @@ class BridgeRepository(
             WireErrorCode.E_UNSUPPORTED,
         )
         const val TAIL_COUNT = 60
+        const val CACHE_WRITE_DELAY_MILLIS = 800L
     }
 }
 

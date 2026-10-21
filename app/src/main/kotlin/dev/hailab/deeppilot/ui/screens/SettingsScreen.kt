@@ -82,12 +82,23 @@ import dev.hailab.deeppilot.ui.components.phaseText
 import dev.hailab.deeppilot.ui.components.plainClickable
 import dev.hailab.deeppilot.ui.palette
 import kotlinx.coroutines.launch
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.fillMaxWidth
+import dev.hailab.deeppilot.core.bridge.ConnectionState
+import dev.hailab.deeppilot.core.hosts.HostProfile
 
 @Composable
 fun SettingsScreen(
     repository: BridgeRepository,
     onBack: () -> Unit,
-    onPairAnother: () -> Unit,
+    onAddHost: () -> Unit,
+    onEditHost: (String) -> Unit,
     onOpenIcons: () -> Unit,
     onOpenArchived: () -> Unit,
 ) {
@@ -96,8 +107,8 @@ fun SettingsScreen(
     val host by repository.host.collectAsStateWithLifecycle()
     val connection by repository.connection.collectAsStateWithLifecycle()
     var keepConnected by remember { mutableStateOf(context.graph.store.keepConnected) }
-    var confirmUnpair by remember { mutableStateOf(false) }
-    var menuOpen by remember { mutableStateOf(false) }
+    val roster by repository.roster.collectAsStateWithLifecycle()
+    var pendingDelete by remember { mutableStateOf<HostProfile?>(null) }
     val scope = rememberCoroutineScope()
 
     // System settings pages change these behind our back; re-read on return.
@@ -116,82 +127,41 @@ fun SettingsScreen(
                 .padding(top = AppSpacing.small, bottom = AppSpacing.large),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.section),
         ) {
-            // Host
+            // Hosts (iOS hostCard)
             SettingsCard {
                 Row(Modifier.heightIn(min = 44.dp).padding(horizontal = 17.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         stringResource(R.string.settings_hosts),
                         style = AppType.body.copy(fontWeight = FontWeight.SemiBold),
                         color = p.foreground,
+                        modifier = Modifier.weight(1f),
                     )
-                }
-                SettingsDivider()
-                val current = host
-                Row(
-                    Modifier.heightIn(min = 64.dp).padding(horizontal = 17.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    AppIcon(size = 40.dp)
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        val address = current?.let { HostEndpoints.of(it.host)?.display ?: it.host }.orEmpty()
+                    Row(
+                        Modifier.heightIn(min = 44.dp).plainClickable(onClick = onAddHost),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(Icons.Filled.Add, null, tint = p.foreground, modifier = Modifier.size(16.dp))
                         Text(
-                            address,
+                            stringResource(R.string.action_add),
                             style = AppType.subheadline.copy(fontWeight = FontWeight.SemiBold),
                             color = p.foreground,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
                         )
-                        current?.tlsFingerprint?.let { fingerprint ->
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Icon(Icons.Filled.Lock, null, tint = p.muted, modifier = Modifier.size(11.dp))
-                                Text(
-                                    fingerprint.removePrefix("sha256:").take(8),
-                                    style = AppType.caption.copy(fontFamily = FontFamily.Monospace),
-                                    color = p.muted,
-                                    maxLines = 1,
-                                )
-                            }
-                        }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        ConnectionStatusLight(connection, backdrop = p.surface)
-                        Text(phaseText(connection), style = AppType.caption.copy(fontWeight = FontWeight.Medium), color = p.muted, maxLines = 1)
-                    }
-                    Box {
-                        Box(
-                            Modifier
-                                .size(32.dp)
-                                .background(p.mutedSurface, CircleShape)
-                                .plainClickable { menuOpen = true },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(Icons.Filled.MoreHoriz, stringResource(R.string.settings_host_actions), tint = p.foreground, modifier = Modifier.size(20.dp))
-                        }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_reconnect)) },
-                                onClick = {
-                                    menuOpen = false
-                                    repository.reconnect()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.settings_pair_again)) },
-                                onClick = {
-                                    menuOpen = false
-                                    onPairAnother()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.settings_unpair), color = p.danger) },
-                                onClick = {
-                                    menuOpen = false
-                                    confirmUnpair = true
-                                },
-                            )
-                        }
-                    }
+                }
+                roster.profiles.forEach { profile ->
+                    SettingsDivider()
+                    HostRow(
+                        profile = profile,
+                        active = profile.id == host?.profileId,
+                        launchDefault = profile.id == roster.launch?.id,
+                        connection = connection,
+                        onSelect = { repository.selectHost(profile.id) },
+                        onEdit = { onEditHost(profile.id) },
+                        onSetLaunch = { repository.setLaunchHost(profile.id) },
+                        onReconnect = { repository.reconnect() },
+                        onDelete = { pendingDelete = profile },
+                    )
                 }
             }
 
@@ -279,22 +249,152 @@ fun SettingsScreen(
         }
     }
 
-    if (confirmUnpair) {
+    pendingDelete?.let { profile ->
         AlertDialog(
-            onDismissRequest = { confirmUnpair = false },
-            title = { Text(stringResource(R.string.settings_unpair)) },
-            text = { Text(stringResource(R.string.settings_unpair_confirm)) },
+            onDismissRequest = { pendingDelete = null },
+            title = { Text(stringResource(R.string.settings_host_delete_title, profile.name)) },
+            text = { Text(stringResource(R.string.settings_host_delete_message)) },
             confirmButton = {
                 TextButton(onClick = {
-                    confirmUnpair = false
-                    ConnectionService.stop(context)
-                    scope.launch { repository.unpair() }
-                }) { Text(stringResource(R.string.settings_unpair), color = p.danger) }
+                    pendingDelete = null
+                    if (roster.profiles.size <= 1) ConnectionService.stop(context)
+                    scope.launch { repository.deleteHost(profile.id) }
+                }) { Text(stringResource(R.string.action_delete), color = p.danger) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmUnpair = false }) { Text(stringResource(R.string.action_cancel)) }
+                TextButton(onClick = { pendingDelete = null }) { Text(stringResource(R.string.action_cancel)) }
             },
         )
+    }
+}
+
+/** One paired computer (iOS `instanceRow`): tap to connect to it, menu to edit, pin or delete. */
+@Composable
+private fun HostRow(
+    profile: HostProfile,
+    active: Boolean,
+    launchDefault: Boolean,
+    connection: ConnectionState,
+    onSelect: () -> Unit,
+    onEdit: () -> Unit,
+    onSetLaunch: () -> Unit,
+    onReconnect: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val p = palette
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .plainClickable(enabled = !active, onClick = onSelect)
+            .padding(horizontal = 17.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        AppIcon(size = 40.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    profile.name,
+                    style = AppType.subheadline.copy(fontWeight = FontWeight.SemiBold),
+                    color = p.foreground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (launchDefault) {
+                    Text(
+                        stringResource(R.string.settings_host_default_badge),
+                        style = AppType.caption2.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
+                        color = p.foreground,
+                        modifier = Modifier
+                            .background(p.mutedSurface, CircleShape)
+                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                profile.tlsFingerprint?.let { fingerprint ->
+                    Icon(Icons.Filled.Lock, null, tint = p.muted, modifier = Modifier.size(11.dp))
+                    Text(
+                        fingerprint.removePrefix("sha256:").take(8),
+                        style = AppType.caption.copy(fontFamily = FontFamily.Monospace),
+                        color = p.muted,
+                        maxLines = 1,
+                    )
+                    Text("·", style = AppType.caption, color = p.muted)
+                }
+                Text(
+                    HostEndpoints.of(profile.host)?.display ?: profile.host,
+                    style = AppType.caption,
+                    color = p.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (active) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                ConnectionStatusLight(connection, backdrop = p.surface)
+                Text(phaseText(connection), style = AppType.caption.copy(fontWeight = FontWeight.Medium), color = p.muted, maxLines = 1)
+            }
+        }
+        Box {
+            Box(
+                Modifier
+                    .size(32.dp)
+                    .background(p.mutedSurface, CircleShape)
+                    .plainClickable { menuOpen = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.MoreHoriz,
+                    stringResource(R.string.settings_host_actions_named, profile.name),
+                    tint = p.foreground,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.action_edit)) },
+                    leadingIcon = { Icon(Icons.Filled.Edit, null) },
+                    onClick = {
+                        menuOpen = false
+                        onEdit()
+                    },
+                )
+                if (!launchDefault) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.settings_host_set_launch)) },
+                        leadingIcon = { Icon(Icons.Filled.PushPin, null) },
+                        onClick = {
+                            menuOpen = false
+                            onSetLaunch()
+                        },
+                    )
+                }
+                if (active) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.action_reconnect)) },
+                        leadingIcon = { Icon(Icons.Filled.Refresh, null) },
+                        onClick = {
+                            menuOpen = false
+                            onReconnect()
+                        },
+                    )
+                }
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.action_delete), color = p.danger) },
+                    leadingIcon = { Icon(Icons.Filled.Delete, null, tint = p.danger) },
+                    onClick = {
+                        menuOpen = false
+                        onDelete()
+                    },
+                )
+            }
+        }
     }
 }
 

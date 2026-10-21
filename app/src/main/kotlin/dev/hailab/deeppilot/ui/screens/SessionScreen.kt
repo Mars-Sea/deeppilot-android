@@ -126,7 +126,9 @@ fun SessionScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
-    var draft by rememberSaveable(sessionId) { mutableStateOf("") }
+    var draft by rememberSaveable(sessionId) { mutableStateOf(repository.draft(sessionId)) }
+    // Keep the unsent text per conversation, across leaving the screen and relaunches.
+    LaunchedEffect(sessionId) { snapshotFlow { draft }.collect { repository.saveDraft(sessionId, it) } }
     var pendingText by remember { mutableStateOf<String?>(null) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var stopping by remember { mutableStateOf(false) }
