@@ -28,9 +28,9 @@ data class Envelope(
     val v: Int = PROTOCOL_VERSION,
     val type: String,
     val id: String? = null,
-    val ts: Long? = null,
+    @Serializable(with = LenientLongSerializer::class) val ts: Long? = null,
     /** Server push sequence (§7). Request responses carry none. */
-    val seq: Long? = null,
+    @Serializable(with = LenientLongSerializer::class) val seq: Long? = null,
     val payload: JsonElement? = null,
 ) {
     /** Decodes [payload] as [T]; null when absent or malformed. */

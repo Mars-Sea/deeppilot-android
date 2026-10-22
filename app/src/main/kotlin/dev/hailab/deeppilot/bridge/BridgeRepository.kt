@@ -69,6 +69,7 @@ import dev.hailab.deeppilot.core.protocol.SessionSummary
 import dev.hailab.deeppilot.core.protocol.SessionTail
 import dev.hailab.deeppilot.core.protocol.SessionsDelta
 import dev.hailab.deeppilot.core.protocol.SessionsSnapshot
+import dev.hailab.deeppilot.core.protocol.Welcome
 import dev.hailab.deeppilot.core.protocol.WelcomeCapabilities
 import dev.hailab.deeppilot.core.protocol.WireErrorCode
 import dev.hailab.deeppilot.core.protocol.Workspace
@@ -168,16 +169,10 @@ class BridgeRepository(
         drafts.bind(_host.value?.profileId)
         _host.value?.let { restoreSessions(it.profileId) }
 
+        // Re-sync on every welcome frame, not on the connection StateFlow: a quick
+        // reconnect with an identical welcome is conflated away there, and the new
+        // socket then never re-opened the conversation on screen.
         scope.launch { client.frames.collect { handle(it) } }
-        scope.launch {
-            client.state.collect { state ->
-                if (state is ConnectionState.Authenticated) {
-                    _capabilities.value = state.welcome.capabilities
-                    refresh()
-                    reconcileDeliveries()
-                }
-            }
-        }
         _host.value?.let { client.start(it) }
     }
 
@@ -383,12 +378,16 @@ class BridgeRepository(
         val oldest = current.messages.firstOrNull()?.seq ?: return
         _openSession.update { it?.copy(loadingHistory = true) }
         scope.launch {
-            val sent = client.send(
-                FrameType.SESSION_HISTORY,
-                HistoryRequest.serializer(),
-                HistoryRequest(current.sessionId, beforeSeq = oldest),
-            )
-            if (!sent) _openSession.update { it?.copy(loadingHistory = false) }
+            // §4 requires an id; the page itself is merged by handle() as it passes.
+            val loaded = runCatching {
+                client.request(
+                    FrameType.SESSION_HISTORY,
+                    HistoryRequest.serializer(),
+                    HistoryRequest(current.sessionId, beforeSeq = oldest),
+                    timeoutMillis = 20_000,
+                )
+            }.isSuccess
+            if (!loaded) _openSession.update { if (it?.sessionId == current.sessionId) it.copy(loadingHistory = false) else it }
         }
     }
 
@@ -717,6 +716,11 @@ class BridgeRepository(
 
     private fun handle(envelope: Envelope) {
         when (envelope.type) {
+            FrameType.WELCOME -> {
+                _capabilities.value = envelope.decode(Welcome.serializer())?.capabilities
+                refresh()
+                reconcileDeliveries()
+            }
             FrameType.RESYNC -> refresh()
             FrameType.SCHEDULE_CHANGED -> _schedules.value?.let { loadSchedules(it.sessionId) }
             FrameType.SESSION_RENAMED -> envelope.decode(SessionRenamed.serializer())?.let { renamed ->
