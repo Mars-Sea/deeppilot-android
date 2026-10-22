@@ -157,7 +157,7 @@ data class Welcome(
     val deviceId: String,
     val scopes: List<String> = emptyList(),
     val capabilities: WelcomeCapabilities = WelcomeCapabilities(),
-    val cursor: Long = 0,
+    @Serializable(with = LenientLongSerializer::class) val cursor: Long = 0,
     val resumed: Boolean = false,
 )
 
@@ -178,7 +178,7 @@ data class SessionSummary(
     val title: String = "",
     /** running | idle | error | unknown */
     val status: String = "unknown",
-    val lastActivityTs: Long = 0,
+    @Serializable(with = LenientLongSerializer::class) val lastActivityTs: Long = 0,
     val todos: TodoCounts? = null,
     val todoItems: List<TodoItem>? = null,
     val activity: String? = null,
@@ -191,7 +191,10 @@ data class SessionSummary(
 )
 
 @Serializable
-data class SessionsSnapshot(val full: Boolean = true, val sessions: List<SessionSummary> = emptyList())
+data class SessionsSnapshot(
+    val full: Boolean = true,
+    @Serializable(with = SessionListSerializer::class) val sessions: List<SessionSummary> = emptyList(),
+)
 
 /** Answer to `c2s.sessions.archived` (§4c); rows never appear in the live list. */
 @Serializable
@@ -199,7 +202,7 @@ data class ArchivedSessionsSnapshot(val sessions: List<SessionSummary> = emptyLi
 
 @Serializable
 data class SessionsDelta(
-    val upserted: List<SessionSummary> = emptyList(),
+    @Serializable(with = SessionListSerializer::class) val upserted: List<SessionSummary> = emptyList(),
     val removedIds: List<String> = emptyList(),
 )
 
@@ -230,7 +233,7 @@ data class MessageContext(val label: String? = null, val form: String? = null)
 
 @Serializable
 data class MessageProjection(
-    val seq: Long,
+    @Serializable(with = LenientLongSerializer::class) val seq: Long,
     /** user | assistant | tool | system | error */
     val role: String,
     val text: String? = null,
@@ -239,7 +242,7 @@ data class MessageProjection(
     val tool: ToolInfo? = null,
     val attachments: List<MessageAttachment>? = null,
     val context: MessageContext? = null,
-    val ts: Long = 0,
+    @Serializable(with = LenientLongSerializer::class) val ts: Long = 0,
     val truncated: Boolean = false,
 )
 
@@ -252,8 +255,8 @@ data class SessionRef(val sessionId: String)
 @Serializable
 data class SessionTail(
     val sessionId: String,
-    val messages: List<MessageProjection> = emptyList(),
-    val oldestSeq: Long = 0,
+    @Serializable(with = MessageListSerializer::class) val messages: List<MessageProjection> = emptyList(),
+    @Serializable(with = LenientLongSerializer::class) val oldestSeq: Long = 0,
     val hasMore: Boolean = false,
 )
 
@@ -263,7 +266,7 @@ data class HistoryRequest(val sessionId: String, val beforeSeq: Long, val limit:
 @Serializable
 data class HistoryPage(
     val sessionId: String,
-    val messages: List<MessageProjection> = emptyList(),
+    @Serializable(with = MessageListSerializer::class) val messages: List<MessageProjection> = emptyList(),
     val hasMore: Boolean = false,
 )
 
@@ -271,7 +274,7 @@ data class HistoryPage(
 data class SessionEvent(
     val sessionId: String,
     val kind: String,
-    val seq: Long,
+    @Serializable(with = LenientLongSerializer::class) val seq: Long,
     val data: JsonElement? = null,
 )
 
@@ -285,10 +288,10 @@ data class TurnEndBody(val ok: Boolean? = null)
 data class ToolEndBody(
     val ok: Boolean? = null,
     val callId: String? = null,
-    val seq: Long? = null,
+    @Serializable(with = LenientLongSerializer::class) val seq: Long? = null,
     val summary: String? = null,
     val attachments: List<MessageAttachment>? = null,
-    val ts: Long? = null,
+    @Serializable(with = LenientLongSerializer::class) val ts: Long? = null,
 )
 
 // ---------- write path ----------

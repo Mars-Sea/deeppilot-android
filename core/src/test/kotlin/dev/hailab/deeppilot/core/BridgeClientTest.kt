@@ -7,6 +7,7 @@ import dev.hailab.deeppilot.core.bridge.ConnectionState
 import dev.hailab.deeppilot.core.bridge.CursorStore
 import dev.hailab.deeppilot.core.bridge.FailureReason
 import dev.hailab.deeppilot.core.bridge.HostCredentials
+import dev.hailab.deeppilot.core.bridge.NotConnectedException
 import dev.hailab.deeppilot.core.pairing.PairingClient
 import dev.hailab.deeppilot.core.pairing.PairingFailure
 import dev.hailab.deeppilot.core.pairing.PairingLink
@@ -84,10 +85,11 @@ class BridgeClientTest {
     }
 
     /** A minimal bridge: challenge, verify the proof, welcome, answer sessions.list. */
-    private fun bridge(closeWith: Int? = null) = object : WebSocketListener() {
+    private fun bridge(closeWith: Int? = null, challengeDelayMillis: Long = 0) = object : WebSocketListener() {
         val challenge = AuthChallenge("bm9uY2U", audience, System.currentTimeMillis(), System.currentTimeMillis() + 30_000)
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            if (challengeDelayMillis > 0) Thread.sleep(challengeDelayMillis)
             webSocket.send(
                 Envelope(
                     type = FrameType.AUTH_CHALLENGE,
@@ -185,6 +187,37 @@ class BridgeClientTest {
         val state = withTimeout(10_000) { client.state.first { it is ConnectionState.Failed } }
         assertEquals(FailureReason.AuthRejected(4401), (state as ConnectionState.Failed).reason)
         client.stop()
+    }
+
+    @Test
+    fun authTimeoutRetriesInsteadOfFailing() = runBlocking {
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(closeWith = 4402)))
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge()))
+        val client = client()
+        client.start(credentials())
+        withTimeout(10_000) { client.state.first { it is ConnectionState.Authenticated } }
+        assertEquals(2, server.requestCount)
+        client.stop()
+    }
+
+    @Test
+    fun pokeLeavesAHandshakeInFlightAlone() = runBlocking {
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(challengeDelayMillis = 1_000)))
+        val client = client()
+        client.start(credentials())
+        withTimeout(5_000) { client.state.first { it is ConnectionState.Connecting } }
+        repeat(3) { client.poke() }
+        withTimeout(10_000) { client.state.first { it is ConnectionState.Authenticated } }
+        assertEquals(1, server.requestCount)
+        client.stop()
+    }
+
+    @Test
+    fun requestsWaitForWelcome() = runBlocking {
+        val client = client()
+        val refused = runCatching { client.request(FrameType.SESSIONS_LIST) }.exceptionOrNull()
+        assertTrue(refused is NotConnectedException)
+        assertEquals(false, client.send(FrameType.SESSIONS_LIST))
     }
 
     @Test

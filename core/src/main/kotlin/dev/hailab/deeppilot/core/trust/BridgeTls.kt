@@ -64,6 +64,9 @@ object BridgeTls {
         val builder = base.newBuilder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            // WebSocket-level pings fail a half-open socket (Wi-Fi gone, NAT expired)
+            // within a minute instead of leaving it "connected" until the next poke.
+            .pingInterval(30, TimeUnit.SECONDS)
         if (fingerprint == null) return builder.build() to null
         val trustManager = PinnedTrustManager(fingerprint)
         val context = SSLContext.getInstance("TLS")

@@ -62,7 +62,7 @@ interface CursorStore {
 }
 
 sealed interface FailureReason {
-    /** 4401 / 4402 / 4500 or a bad welcome: the device must pair again. */
+    /** 4401 / 4500 or a bad welcome: the device must pair again. */
     data class AuthRejected(val closeCode: Int?) : FailureReason
     data object AudienceMismatch : FailureReason
     data object DeviceRevoked : FailureReason
@@ -114,6 +114,11 @@ class BridgeClient(
     private var http: OkHttpClient? = null
     private var trust: PinnedTrustManager? = null
     private var socket: WebSocket? = null
+    /** When the current socket was opened, to tell a fresh handshake from a stuck one. */
+    private var socketOpenedAt = 0L
+    /** True between welcome and the loss of that socket; only then may callers send. */
+    private var authenticated = false
+    private var probing = false
     private var epoch = 0
     private var attempt = 0
     private var authRejected = false
@@ -149,29 +154,45 @@ class BridgeClient(
     }
 
     /**
-     * Foreground wake-up. A socket that claims to be authenticated is probed
-     * with one ping (a suspended process can miss the close); anything else
-     * reconnects at once.
+     * Foreground or network wake-up. A socket that claims to be authenticated is
+     * probed with one ping (a suspended process can miss the close); a pending
+     * backoff is cut short.
+     *
+     * A handshake still in flight is left alone: the bridge counts every socket
+     * closed before welcome as a failed authentication and blocks the phone for
+     * 15 minutes after five of them (auth-rate-limit.ts). App start, the service
+     * start and the network callback used to poke in a burst and abort each
+     * other's handshakes, which is how the phone got locked out.
      */
     fun poke() {
         scope.launch {
             if (credentials == null || authRejected) return@launch
             attempt = 0
-            if (_state.value !is ConnectionState.Authenticated) {
-                closeSocket(reconnect = true)
-                openSocket()
-                return@launch
-            }
-            val probeEpoch = epoch
-            launch {
-                try {
-                    request(FrameType.PING, JsonObject(emptyMap()), timeoutMillis = 4_000)
-                } catch (_: Exception) {
-                    if (epoch == probeEpoch && credentials != null) {
-                        closeSocket(reconnect = true)
-                        openSocket()
-                    }
+            when {
+                authenticated -> probe()
+                socket != null && System.nanoTime() - socketOpenedAt < HANDSHAKE_GRACE_NANOS -> Unit
+                else -> {
+                    closeSocket(reconnect = true)
+                    openSocket()
                 }
+            }
+        }
+    }
+
+    private fun probe() {
+        if (probing) return
+        probing = true
+        val probeEpoch = epoch
+        scope.launch {
+            try {
+                request(FrameType.PING, JsonObject(emptyMap()), timeoutMillis = 4_000)
+            } catch (_: Exception) {
+                if (epoch == probeEpoch && credentials != null) {
+                    closeSocket(reconnect = true)
+                    openSocket()
+                }
+            } finally {
+                probing = false
             }
         }
     }
@@ -187,9 +208,12 @@ class BridgeClient(
         }
     }
 
-    /** Fire-and-forget frame. Returns false when there is no socket. */
+    /**
+     * Fire-and-forget frame. Returns false until the connection is authenticated:
+     * before welcome the bridge answers anything but proof and ping with an error.
+     */
     suspend fun send(type: String, payload: JsonElement = JsonObject(emptyMap())): Boolean = withContext(serial) {
-        sendLocked(Envelope(type = type, ts = System.currentTimeMillis(), payload = payload))
+        authenticated && sendLocked(Envelope(type = type, ts = System.currentTimeMillis(), payload = payload))
     }
 
     suspend fun <T> send(type: String, serializer: KSerializer<T>, payload: T): Boolean =
@@ -200,7 +224,7 @@ class BridgeClient(
         val id = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Envelope>()
         withContext(serial) {
-            if (socket == null) throw NotConnectedException()
+            if (!authenticated) throw NotConnectedException()
             pending[id] = deferred
             if (!sendLocked(Envelope(type = type, id = id, ts = System.currentTimeMillis(), payload = payload))) {
                 pending.remove(id)
@@ -237,6 +261,7 @@ class BridgeClient(
         val socketEpoch = epoch
         _state.value = ConnectionState.Connecting(attempt)
         val request = Request.Builder().url(endpoints.webSocket).build()
+        socketOpenedAt = System.nanoTime()
         socket = client.newWebSocket(request, Listener(socketEpoch))
     }
 
@@ -248,14 +273,16 @@ class BridgeClient(
         epoch += 1
         socket?.cancel()
         socket = null
+        authenticated = false
         failAllPending()
         if (!reconnect) attempt = 0
     }
 
-    private fun scheduleReconnect() {
+    /** [atLeastMillis]: the bridge's Retry-After when it refused the upgrade. */
+    private fun scheduleReconnect(atLeastMillis: Long = 0) {
         if (credentials == null || authRejected) return
         attempt += 1
-        val delayMillis = backoff.delayMillis(attempt)
+        val delayMillis = maxOf(backoff.delayMillis(attempt), atLeastMillis)
         _state.value = ConnectionState.Connecting(attempt)
         reconnectJob?.cancel()
         val scheduledEpoch = epoch
@@ -271,19 +298,26 @@ class BridgeClient(
         _state.value = ConnectionState.Failed(reason)
     }
 
-    private fun handleTransportLoss(socketEpoch: Int, closeCode: Int?, closeReason: String?, error: Throwable?) {
+    private fun handleTransportLoss(
+        socketEpoch: Int,
+        closeCode: Int?,
+        closeReason: String?,
+        error: Throwable?,
+        retryAfterMillis: Long = 0,
+    ) {
         if (socketEpoch != epoch) return
         // onClosing and onClosed both report the same socket; only the first counts.
         epoch += 1
         pingJob?.cancel()
         socket = null
+        authenticated = false
         failAllPending()
         if (authRejected) return
         when {
             closeCode == 4401 && closeReason == "device revoked" -> fail(FailureReason.DeviceRevoked)
             closeCode in AUTH_FAILURE_CODES -> fail(FailureReason.AuthRejected(closeCode))
             error != null && trust?.lastRejection != null -> fail(FailureReason.Untrusted(trust!!.lastRejection!!))
-            else -> scheduleReconnect()
+            else -> scheduleReconnect(retryAfterMillis)
         }
     }
 
@@ -292,8 +326,10 @@ class BridgeClient(
         val envelope = Envelope.parse(text) ?: return
         val id = envelope.id
         if (envelope.type == FrameType.ERROR && id == null) {
-            // Uncorrelated error = server shutting down (§8): fail every waiter now.
-            failAllPending()
+            // Server shutting down (§8, E_INTERNAL): fail every waiter now. Other uncorrelated
+            // errors answer a fire-and-forget frame (a session.open that found nothing) and
+            // must not take unrelated requests, such as a prompt send, down with them.
+            if (envelope.decode(ErrorPayload.serializer())?.code == WireErrorCode.E_INTERNAL.name) failAllPending()
         } else if (id != null) {
             pending.remove(id)?.complete(envelope)
         }
@@ -309,6 +345,7 @@ class BridgeClient(
                 }
                 if (!welcome.resumed) replaceCursor(welcome.cursor)
                 attempt = 0
+                authenticated = true
                 _state.value = ConnectionState.Authenticated(welcome)
                 startPing()
             }
@@ -405,12 +442,22 @@ class BridgeClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            scope.launch { handleTransportLoss(socketEpoch, null, null, t) }
+            val retryAfter = response?.takeIf { it.code == 429 }?.header("Retry-After")?.toLongOrNull()
+            val retryAfterMillis = retryAfter?.let { (it * 1000).coerceIn(0, MAX_RETRY_AFTER_MILLIS) } ?: 0
+            scope.launch { handleTransportLoss(socketEpoch, null, null, t, retryAfterMillis) }
         }
     }
 
     companion object {
-        private val AUTH_FAILURE_CODES = setOf(4401, 4402, 4500)
+        /**
+         * 4401 (bad proof) and 4500 (version mismatch) need the user. 4402 is only an
+         * auth timeout (a slow network, a phone that dozed mid-handshake), so it retries.
+         */
+        private val AUTH_FAILURE_CODES = setOf(4401, 4500)
+        /** A handshake younger than this is not aborted by [poke]; connectTimeout is 10 s. */
+        private const val HANDSHAKE_GRACE_NANOS = 15_000_000_000L
+        /** The bridge blocks for up to 15 min; retry at least every minute so recovery is seen. */
+        private const val MAX_RETRY_AFTER_MILLIS = 60_000L
     }
 }
 
