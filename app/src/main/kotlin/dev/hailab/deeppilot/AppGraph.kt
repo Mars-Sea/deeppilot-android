@@ -6,7 +6,9 @@ import dev.hailab.deeppilot.bridge.AppVisibility
 import dev.hailab.deeppilot.data.AppPreferences
 import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.bridge.BridgeClient
+import dev.hailab.deeppilot.data.ConversationCache
 import dev.hailab.deeppilot.data.DeviceIdentity
+import dev.hailab.deeppilot.data.DraftStore
 import dev.hailab.deeppilot.data.InstanceStore
 import dev.hailab.deeppilot.data.PromptOutboxStore
 import dev.hailab.deeppilot.notify.Notifier
@@ -48,6 +50,8 @@ class AppGraph(private val app: Application) {
         scope = scope,
         images = AttachmentImages(app.cacheDir),
         outbox = PromptOutboxStore(app),
+        drafts = DraftStore(app, scope),
+        cache = ConversationCache(app),
     )
     val preferences = AppPreferences(app)
 

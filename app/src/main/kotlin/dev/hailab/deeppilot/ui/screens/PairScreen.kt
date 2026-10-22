@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Warning
@@ -51,6 +52,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.bridge.BridgeRepository
+import dev.hailab.deeppilot.core.hosts.HostProfile
 import dev.hailab.deeppilot.core.pairing.HostEndpoints
 import dev.hailab.deeppilot.core.pairing.PairingLink
 import dev.hailab.deeppilot.ui.AppLayout
@@ -68,13 +70,18 @@ import dev.hailab.deeppilot.ui.errorText
 import dev.hailab.deeppilot.ui.palette
 import kotlinx.coroutines.launch
 
-/** iOS `PairingFlowView`: hero on first launch, QR scan first, manual entry folded below. */
+/**
+ * iOS `PairingFlowView`: hero on first launch, QR scan first, manual entry folded below.
+ * From settings it adds a host, or edits [editing]: a new pairing replaces its
+ * credentials, and with none only the name is saved.
+ */
 @Composable
 fun PairScreen(
     repository: BridgeRepository,
     initialLink: String?,
     onCancel: (() -> Unit)?,
     onPaired: () -> Unit,
+    editing: HostProfile? = null,
 ) {
     val p = palette
     var text by rememberSaveable(initialLink) { mutableStateOf(initialLink.orEmpty()) }
@@ -84,6 +91,7 @@ fun PairScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val firstLaunch = onCancel == null
+    var name by rememberSaveable(editing?.id) { mutableStateOf(editing?.name.orEmpty()) }
 
     fun hostOf(value: String) = runCatching { PairingLink.parse(value.trim()) }.getOrNull()
         ?.let { HostEndpoints.of(it.host)?.display ?: it.host }
@@ -95,7 +103,7 @@ fun PairScreen(
             busy = true
             error = null
             connectingTo = hostOf(value)
-            error = attempt { repository.pair(PairingLink.parse(value.trim())) }
+            error = attempt { repository.pair(PairingLink.parse(value.trim()), name, editing?.id) }
             busy = false
             if (error == null) onPaired()
         }
@@ -120,7 +128,26 @@ fun PairScreen(
                         modifier = Modifier.padding(horizontal = 10.dp).plainClickable { onCancel?.invoke() },
                     )
                 },
-                principal = { NavTitle(stringResource(R.string.pair_again_title)) },
+                principal = {
+                    NavTitle(stringResource(if (editing != null) R.string.settings_host_edit else R.string.settings_host_add))
+                },
+                trailing = {
+                    if (editing != null) {
+                        Text(
+                            stringResource(R.string.action_save),
+                            style = AppType.body.copy(fontWeight = FontWeight.SemiBold),
+                            color = if (busy) p.muted else p.foreground,
+                            modifier = Modifier.padding(horizontal = 10.dp).plainClickable(enabled = !busy) {
+                                if (text.isNotBlank()) {
+                                    submit(text)
+                                } else {
+                                    repository.renameHost(editing.id, name)
+                                    onPaired()
+                                }
+                            },
+                        )
+                    }
+                },
             )
         }
         Column(
@@ -147,6 +174,44 @@ fun PairScreen(
                     }
                 }
                 Spacer(Modifier.height(AppSpacing.section))
+            }
+
+            if (!firstLaunch) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(p.surface, RoundedCornerShape(AppRadius.large))
+                        .padding(AppSpacing.regular),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.compact),
+                ) {
+                    val placeholder = stringResource(R.string.settings_host_name_placeholder)
+                    Text(placeholder, style = AppType.caption.copy(fontWeight = FontWeight.SemiBold), color = p.muted)
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 46.dp)
+                            .background(p.mutedSurface, RoundedCornerShape(AppRadius.medium))
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        if (name.isEmpty()) Text(placeholder, style = AppType.body, color = p.muted)
+                        BasicTextField(
+                            value = name,
+                            onValueChange = { name = it },
+                            enabled = !busy,
+                            singleLine = true,
+                            textStyle = AppType.body.copy(color = p.foreground),
+                            cursorBrush = SolidColor(p.accent),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    editing?.let { profile ->
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            Icon(Icons.Filled.Computer, null, tint = p.muted, modifier = Modifier.size(13.dp))
+                            Text(HostEndpoints.of(profile.host)?.display ?: profile.host, style = AppType.footnote, color = p.muted)
+                        }
+                    }
+                }
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.regular)) {
@@ -269,7 +334,10 @@ fun PairScreen(
                 }
             }
 
-            Text(stringResource(R.string.pair_scan_hint), style = AppType.footnote, color = p.muted)
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.small)) {
+                Text(stringResource(R.string.pair_scan_hint), style = AppType.footnote, color = p.muted)
+                if (editing != null) Text(stringResource(R.string.settings_host_edit_footer), style = AppType.footnote, color = p.muted)
+            }
         }
     }
 }

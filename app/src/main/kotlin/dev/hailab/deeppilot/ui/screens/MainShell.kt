@@ -24,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -47,7 +48,8 @@ import kotlin.math.roundToInt
 fun MainShell(
     repository: BridgeRepository,
     sessionToOpen: MutableState<String?>,
-    onPairAnother: () -> Unit,
+    onAddHost: () -> Unit,
+    onEditHost: (String) -> Unit,
 ) {
     val nav = rememberNavController()
     val entry by nav.currentBackStackEntryAsState()
@@ -61,6 +63,20 @@ fun MainShell(
         nav.navigate("session/${Uri.encode(id)}") {
             popUpTo(HOME)
             launchSingleTop = true
+        }
+    }
+
+    // Another host's conversations are not this host's: drop any open session screen.
+    val activeHost by repository.host.collectAsStateWithLifecycle()
+    var shownHost by remember { mutableStateOf(activeHost?.profileId) }
+    LaunchedEffect(activeHost?.profileId) {
+        val id = activeHost?.profileId
+        if (id == shownHost) return@LaunchedEffect
+        shownHost = id
+        if (nav.currentBackStackEntry?.destination?.route == SETTINGS) {
+            nav.navigate(SETTINGS) { popUpTo(HOME) }
+        } else {
+            nav.popBackStack(HOME, inclusive = false)
         }
     }
 
@@ -124,7 +140,8 @@ fun MainShell(
                     SettingsScreen(
                         repository = repository,
                         onBack = { nav.popBackStack() },
-                        onPairAnother = onPairAnother,
+                        onAddHost = onAddHost,
+                        onEditHost = onEditHost,
                         onOpenIcons = { nav.navigate(APP_ICON) { launchSingleTop = true } },
                         onOpenArchived = { nav.navigate(ARCHIVED) { launchSingleTop = true } },
                     )

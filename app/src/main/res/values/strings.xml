@@ -306,4 +306,17 @@
         <item quantity="one">%1$d attachment</item>
         <item quantity="other">%1$d attachments</item>
     </plurals>
+    <string name="action_add">Add</string>
+    <string name="action_edit">Edit</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_save">Save</string>
+    <string name="settings_host_add">Add host</string>
+    <string name="settings_host_edit">Edit host</string>
+    <string name="settings_host_name_placeholder">Name (default DeepPilot)</string>
+    <string name="settings_host_edit_footer">Pasting new pairing info replaces this host\'s credentials; leave it empty to save only other changes.</string>
+    <string name="settings_host_default_badge">Default</string>
+    <string name="settings_host_set_launch">Set as launch default</string>
+    <string name="settings_host_actions_named">Manage host “%1$s”</string>
+    <string name="settings_host_delete_title">Delete “%1$s”?</string>
+    <string name="settings_host_delete_message">This host\'s pairing info and the conversations cached for it will be removed along with it.</string>
 </resources>

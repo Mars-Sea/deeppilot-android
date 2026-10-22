@@ -369,6 +369,7 @@ fun SessionDrawer(
     val sessions by repository.sessions.collectAsStateWithLifecycle()
     val connection by repository.connection.collectAsStateWithLifecycle()
     val host by repository.host.collectAsStateWithLifecycle()
+    val roster by repository.roster.collectAsStateWithLifecycle()
     val p = palette
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -402,7 +403,7 @@ fun SessionDrawer(
             AppIcon(size = 36.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(
-                    host?.let { HostEndpoints.of(it.host)?.display ?: it.host } ?: stringResource(R.string.app_name),
+                    roster.active?.name ?: host?.let { HostEndpoints.of(it.host)?.display ?: it.host } ?: stringResource(R.string.app_name),
                     style = AppType.body.copy(fontWeight = FontWeight.Bold),
                     color = p.foreground,
                     maxLines = 1,

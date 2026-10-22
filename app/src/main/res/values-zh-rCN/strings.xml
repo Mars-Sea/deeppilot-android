@@ -305,4 +305,17 @@
         <item quantity="one">%1$d 个附件</item>
         <item quantity="other">%1$d 个附件</item>
     </plurals>
+    <string name="action_add">添加</string>
+    <string name="action_edit">编辑</string>
+    <string name="action_delete">删除</string>
+    <string name="action_save">保存</string>
+    <string name="settings_host_add">添加主机</string>
+    <string name="settings_host_edit">编辑主机</string>
+    <string name="settings_host_name_placeholder">名称（默认 DeepPilot）</string>
+    <string name="settings_host_edit_footer">粘贴新的配对信息会替换主机的连接凭证；留空则只保存名称等改动。</string>
+    <string name="settings_host_default_badge">默认</string>
+    <string name="settings_host_set_launch">设为启动默认</string>
+    <string name="settings_host_actions_named">管理主机“%1$s”</string>
+    <string name="settings_host_delete_title">删除主机「%1$s」？</string>
+    <string name="settings_host_delete_message">该主机的配对信息与本机缓存的对话会被一并移除。</string>
 </resources>
