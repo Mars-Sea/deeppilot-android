@@ -42,6 +42,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import java.util.UUID
 import kotlin.random.Random
 
@@ -129,6 +130,13 @@ class BridgeClient(
     private val progress = HashMap<String, (Envelope) -> Unit>()
 
     val currentCredentials: HostCredentials? get() = credentials
+
+    /**
+     * The diagnostic id of the newest socket (§2.0), sent as `at=` on the upgrade.
+     * A new one per socket, so a retry is never confused with the attempt before it.
+     */
+    @Volatile var attemptId: String? = null
+        private set
 
     /** Connects to [creds], replacing any current host. */
     fun start(creds: HostCredentials) {
@@ -262,7 +270,9 @@ class BridgeClient(
         epoch += 1
         val socketEpoch = epoch
         _state.value = ConnectionState.Connecting(attempt)
-        val request = Request.Builder().url(endpoints.webSocket).build()
+        val tag = AttemptId.make()
+        attemptId = tag
+        val request = Request.Builder().url(AttemptId.handshakeUrl(endpoints.webSocket, tag)).build()
         socketOpenedAt = System.nanoTime()
         socket = client.newWebSocket(request, Listener(socketEpoch))
     }
@@ -332,9 +342,8 @@ class BridgeClient(
             // errors answer a fire-and-forget frame (a session.open that found nothing) and
             // must not take unrelated requests, such as a prompt send, down with them.
             if (envelope.decode(ErrorPayload.serializer())?.code == WireErrorCode.E_INTERNAL.name) failAllPending()
-        } else if (id != null && envelope.type == "s2c.session.export.chunk") {
-            try { progress[id]?.invoke(envelope) }
-            catch (error: Exception) { pending.remove(id)?.completeExceptionally(error); progress.remove(id) }
+        } else if (id != null && envelope.type in FrameType.CHUNK_TYPES) {
+            deliverChunk(id, envelope)
             return
         } else if (id != null) {
             pending.remove(id)?.complete(envelope)
@@ -357,8 +366,30 @@ class BridgeClient(
                 startPing()
             }
         }
-        envelope.seq?.let { recordCursor(it) }
+        envelope.replaySeq?.let { recordCursor(it) }
         _frames.emit(envelope)
+    }
+
+    /**
+     * A binary frame (§1.1) only ever answers a request of ours that asked for
+     * `binary: true`: it goes to that request's progress handler and nowhere else,
+     * never to [frames] and never to the cursor. Anything else is dropped.
+     */
+    private fun handleBinaryFrame(socketEpoch: Int, bytes: ByteArray) {
+        if (socketEpoch != epoch || bytes.size > MAX_INBOUND_FRAME_BYTES) return
+        val envelope = Envelope.parseBinary(bytes) ?: return
+        val id = envelope.id ?: return
+        if (envelope.type !in FrameType.CHUNK_TYPES || !progress.containsKey(id)) return
+        deliverChunk(id, envelope)
+    }
+
+    private fun deliverChunk(id: String, envelope: Envelope) {
+        try {
+            progress[id]?.invoke(envelope)
+        } catch (error: Exception) {
+            pending.remove(id)?.completeExceptionally(error)
+            progress.remove(id)
+        }
     }
 
     private fun answerChallenge(challenge: AuthChallenge?) {
@@ -440,6 +471,11 @@ class BridgeClient(
             scope.launch { handleFrame(socketEpoch, text) }
         }
 
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            val raw = bytes.toByteArray()
+            scope.launch { handleBinaryFrame(socketEpoch, raw) }
+        }
+
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             webSocket.close(1000, null)
             scope.launch { handleTransportLoss(socketEpoch, code, reason, null) }
@@ -457,6 +493,13 @@ class BridgeClient(
     }
 
     companion object {
+        /**
+         * The biggest frame this client takes, declared to the bridge as
+         * `maxFrameBytes`. OkHttp has no receive limit of its own, unlike iOS
+         * (1 MiB by default), so the same 32 MiB ceiling as iOS is used.
+         */
+        const val MAX_INBOUND_FRAME_BYTES = 32 * 1024 * 1024
+
         /**
          * 4401 (bad proof) and 4500 (version mismatch) need the user. 4402 is only an
          * auth timeout (a slow network, a phone that dozed mid-handshake), so it retries.

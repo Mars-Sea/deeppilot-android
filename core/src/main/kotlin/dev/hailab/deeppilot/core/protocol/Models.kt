@@ -73,6 +73,44 @@ object FrameType {
     const val SCHEDULE_UPDATE = "c2s.schedule.update"
     const val SCHEDULE_DELETE = "c2s.schedule.delete"
     const val SCHEDULE_CHANGED = "s2c.schedule.changed"
+    const val SCHEDULE_UPDATED = "s2c.schedule.updated"
+
+    // Host-level schedules (optional v2 extension, capability schedulesHost)
+    const val SCHEDULE_HOST_LIST = "c2s.schedule.host.list"
+    const val SCHEDULE_HOST_SNAPSHOT = "s2c.schedule.host.snapshot"
+    const val SCHEDULE_HOST_VIEW = "c2s.schedule.host.view"
+    const val SCHEDULE_HOST_TASK = "s2c.schedule.host.task"
+    const val SCHEDULE_HOST_CREATE = "c2s.schedule.host.create"
+    const val SCHEDULE_HOST_EDIT = "c2s.schedule.host.edit"
+    const val SCHEDULE_HOST_RUN = "c2s.schedule.host.run"
+    const val SCHEDULE_HOST_LIMITS = "c2s.schedule.host.limits"
+
+    // Mobile commands and export (optional v2 extension, capability commands)
+    const val SESSION_COMMANDS = "c2s.session.commands"
+    const val SESSION_COMMAND = "c2s.session.command"
+    const val SESSION_PERMISSIONS = "c2s.session.permissions"
+    const val SESSION_FEEDBACK = "c2s.session.feedback"
+    const val SESSION_EXPORT = "c2s.session.export"
+    const val COMMANDS_CHANGED = "s2c.commands.changed"
+    const val MODELS_CHANGED = "s2c.models.changed"
+
+    /** Intermediate answers to one request (§1.1); they never finish it. */
+    const val SESSION_EXPORT_CHUNK = "s2c.session.export.chunk"
+    const val SESSION_ATTACHMENT_CHUNK = "s2c.session.attachment.chunk"
+    val CHUNK_TYPES = setOf(SESSION_EXPORT_CHUNK, SESSION_ATTACHMENT_CHUNK)
+
+    // Live assistant output (optional v2 extension, capability assistantStream)
+    const val SESSION_DELTA = "s2c.session.delta"
+
+    // Running-session queue (optional v2 extension, capability promptQueue)
+    const val SESSION_QUEUE = "s2c.session.queue"
+    const val SESSION_QUEUE_UPDATE = "c2s.session.queue.update"
+
+    // Plugin self-update (optional v2 extension, capability pluginUpdate)
+    const val PLUGIN_UPDATE_CHECK = "c2s.plugin.update.check"
+    const val PLUGIN_UPDATE_STATUS = "s2c.plugin.update.status"
+    const val PLUGIN_UPDATE_APPLY = "c2s.plugin.update.apply"
+    const val PLUGIN_UPDATE_PROGRESS = "s2c.plugin.update.progress"
 }
 
 /** Device scopes requested at pairing; the product grants all of them (§2.2). */
@@ -148,10 +186,22 @@ data class WelcomeCapabilities(
     val sessionRestore: Boolean = false,
     val projectSelection: Boolean = false,
     val schedules: Boolean = false,
+    /** Host-level schedule model (`c2s.schedule.host.*`); wins over [schedules] when both are set. */
+    val schedulesHost: Boolean = false,
     val push: Boolean = false,
     val widgetPush: Boolean = false,
     val liveActivityPush: Boolean = false,
     val deviceRevoke: Boolean = false,
+    /** `mode` on sendPrompt and `c2s.session.queue.update`. */
+    val promptQueue: Boolean = false,
+    /** `s2c.session.delta` live output for opened sessions. */
+    val assistantStream: Boolean = false,
+    /** `c2s.session.export` accepts `format: "markdown"`. */
+    val sessionMarkdown: Boolean = false,
+    /** `c2s.plugin.update.*`. */
+    val pluginUpdate: Boolean = false,
+    /** Export and attachment requests may ask for binary chunk frames (§1.1). */
+    val binaryFrames: Boolean = false,
 )
 
 @Serializable
@@ -319,6 +369,8 @@ data class SendPrompt(
     val documents: List<PromptDocument>? = null,
     /** Stable send identity when the bridge advertises `promptDelivery` (§10). */
     val clientSendId: String? = null,
+    /** `queue` or `steer`, only with `promptQueue`; omitted means queue. */
+    val mode: String? = null,
 )
 
 /** `s2c.ack` for a prompt sent with a clientSendId, and the `c2s.session.delivery` answer. */
@@ -497,8 +549,18 @@ data class SessionModelSelected(val sessionId: String, val selected: ModelSelect
 
 // ---------- attachments read-back ----------
 
+/**
+ * `c2s.session.attachment`. [maxFrameBytes] declares the biggest frame this
+ * client accepts; without it the bridge assumes 1 MiB and answers E_TOO_LARGE
+ * for anything bigger. [binary] (only with `binaryFrames`) switches to raw chunks.
+ */
 @Serializable
-data class AttachmentRequest(val sessionId: String, val attachmentId: String)
+data class AttachmentRequest(
+    val sessionId: String,
+    val attachmentId: String,
+    val maxFrameBytes: Int? = null,
+    val binary: Boolean? = null,
+)
 
 @Serializable
 data class AttachmentData(val mediaType: String? = null, val data: String = "")

@@ -21,8 +21,31 @@ import kotlinx.serialization.Serializable
 @Serializable data class PermissionOption(val value: String, val name: String, val description: String? = null, val confirmation: Boolean = false)
 @Serializable data class PermissionCatalog(val sessionId: String, val options: List<PermissionOption>, val currentValue: String? = null)
 @Serializable data class FeedbackRequest(val sessionId: String, val text: String, val category: String)
-@Serializable data class ExportChunk(val index: Int, val data: String)
-@Serializable data class ExportDone(val sessionId: String, val fileName: String, val chunks: Int, val bytes: Long)
+@Serializable data class ExportChunk(val index: Int, val data: String = "")
+@Serializable data class ExportDone(val sessionId: String, val fileName: String = "", val chunks: Int, val bytes: Long, val mediaType: String? = null)
+
+/** `c2s.session.export`. [format] stays absent for ZIP so older bridges see the old request. */
+@Serializable data class ExportRequest(val sessionId: String, val format: String? = null, val binary: Boolean? = null)
+
+/** ZIP (the default) or the conversation text as Markdown (`sessionMarkdown`). */
+enum class SessionExportFormat(val wire: String, val fileExtension: String) {
+    Zip("zip", "zip"),
+    Markdown("markdown", "md");
+
+    /** Old ZIP receipts may omit the type; Markdown must be confirmed by a bridge that knows it. */
+    fun accepts(mediaType: String?): Boolean {
+        if (mediaType == null) return this == Zip
+        val parts = mediaType.split(';').map { it.trim().lowercase() }
+        if (parts.first() != if (this == Markdown) "text/markdown" else "application/zip") return false
+        if (this == Markdown) {
+            for (parameter in parts.drop(1)) {
+                val pair = parameter.split('=', limit = 2).map { it.trim() }
+                if (pair.first() == "charset" && (pair.size != 2 || pair[1].trim('"') != "utf-8")) return false
+            }
+        }
+        return true
+    }
+}
 
 /** 仅草稿起始命令词进入执行通道；正文中的斜杠与文件路径仍是普通内容。 */
 object SessionCommandLine {
