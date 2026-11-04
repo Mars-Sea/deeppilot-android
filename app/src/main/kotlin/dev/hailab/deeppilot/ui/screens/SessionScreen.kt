@@ -1,6 +1,13 @@
 package dev.hailab.deeppilot.ui.screens
 
 import android.Manifest
+import android.content.Intent
+import androidx.core.content.FileProvider
+import java.io.File
+import java.util.UUID
+import dev.hailab.deeppilot.core.protocol.HostCommand
+import dev.hailab.deeppilot.core.protocol.CommandCatalog
+import dev.hailab.deeppilot.core.protocol.SessionCommandLine
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -42,6 +49,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -145,6 +153,7 @@ fun SessionScreen(
         }
     }
     val capabilities by repository.capabilities.collectAsStateWithLifecycle()
+    val skillsRevision by repository.skillsRevision.collectAsStateWithLifecycle()
     val supportsSchedules = capabilities?.schedules == true
     val supportsFork = capabilities?.sessionFork == true
     LaunchedEffect(sessionId, connected, supportsSchedules) {
@@ -255,29 +264,44 @@ fun SessionScreen(
 
     // Model catalog for this session (§4), loaded once connected and supported.
     var models by remember(sessionId) { mutableStateOf<SessionModels?>(null) }
+    var modelsStale by remember(sessionId) { mutableStateOf(false) }
+    val modelRevision by repository.modelRevision.collectAsState()
+    var modelJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var modelLoadToken by remember { mutableIntStateOf(0) }
     var modelsLoading by remember { mutableStateOf(false) }
     var modelsError by remember { mutableStateOf<String?>(null) }
     var showsModelSheet by remember { mutableStateOf(false) }
+    var showsPermissionSheet by remember { mutableStateOf(false) }
+    var showsFeedbackSheet by remember { mutableStateOf(false) }
+    var commandSending by remember(sessionId) { mutableStateOf(false) }
+    var chosenSkillName by remember(sessionId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(skillsRevision) {
+        showsPermissionSheet = false
+        showsFeedbackSheet = false
+        // 用户已明确选择的技能随草稿保留，目录刷新不能把它变成同名系统指令。
+    }
+
     var changingEffort by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    fun loadModels() {
+    fun loadModels(force: Boolean = false) {
         if (modelsLoading) return
         if (capabilities?.models != true) {
             modelsError = context.getString(R.string.model_switch_unavailable)
             return
         }
         modelsLoading = true
-        scope.launch {
-            var loaded: SessionModels? = null
-            val error = attempt { loaded = repository.loadModels(sessionId) }
-            if (error == null) {
-                models = loaded
-                modelsError = null
-            } else {
-                modelsError = context.errorMessage(error)
-            }
-            modelsLoading = false
+        val token = ++modelLoadToken
+        modelJob = scope.launch {
+            try {
+                var loaded: SessionModels? = null
+                val error = attempt { loaded = repository.loadModels(sessionId, force) { value, stale ->
+                    if (modelLoadToken == token) { models = value; modelsStale = stale }
+                } }
+                if (modelLoadToken != token) return@launch
+                if (error == null) { models = loaded; modelsStale = false; modelsError = null }
+                else modelsError = context.errorMessage(error)
+            } finally { if (modelLoadToken == token) modelsLoading = false }
         }
     }
     suspend fun selectModel(selection: ModelSelection) {
@@ -285,14 +309,107 @@ fun SessionScreen(
         models = models?.copy(current = selected)
         modelsError = null
     }
-    LaunchedEffect(sessionId, connected, capabilities?.models) {
+    LaunchedEffect(sessionId, connected, capabilities?.models, modelRevision) {
+        modelJob?.cancel()
+        modelsLoading = false
         if (connected && capabilities?.models == true) loadModels()
+    }
+
+    fun decorateCommands(catalog: CommandCatalog): CommandCatalog {
+        check(catalog.commands.none { it.name == "model" || it.name == "file" })
+        val local = listOfNotNull(
+            if (capabilities?.models == true) HostCommand("model", "", "client:model") else null,
+            HostCommand("file", "", "client:file"),
+        )
+        return catalog.copy(commands = catalog.commands + local)
+    }
+    suspend fun commandCatalog(force: Boolean = false, cached: ((CommandCatalog, Boolean) -> Unit)? = null): CommandCatalog =
+        decorateCommands(repository.loadCommands(sessionId, force) { value, stale -> cached?.invoke(decorateCommands(value), stale) })
+    fun presentCommand(command: HostCommand) {
+        when (command.action) {
+            "model" -> { focusManager.clearFocus(); showsModelSheet = true }
+            "file" -> showsAttachmentSheet = true
+            "permission" -> { focusManager.clearFocus(); showsPermissionSheet = true }
+            "feedback" -> { focusManager.clearFocus(); showsFeedbackSheet = true }
+        }
+    }
+    fun openCommand(command: HostCommand) {
+        if (command.action !in listOf("permission", "feedback")) { presentCommand(command); return }
+        val revision = skillsRevision
+        val remaining = draft
+        scope.launch {
+            try {
+                val fresh = commandCatalog(force = true)
+                if (revision != skillsRevision) return@launch
+                check(fresh.commands.any { it.name == command.name && it.definitionId == command.definitionId })
+                presentCommand(command)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (draft == remaining) draft = "/" + command.name + if (remaining.isNotEmpty()) " " + remaining else ""
+                alert = context.getString(R.string.composer_commands_title) to context.getString(R.string.composer_commands_failed)
+            }
+        }
+    }
+    fun sendCommand(text: String, outgoing: List<PromptAttachment>) {
+        if (commandSending) return
+        commandSending = true
+        scope.launch {
+            try {
+                val catalog = commandCatalog(force = true)
+                val name = SessionCommandLine.name(text)
+                val command = catalog.commands.firstOrNull { it.name == name }
+                if (command == null) {
+                    check(capabilities?.skills == true && repository.loadSkills(sessionId).any { it.name == name })
+                    // 已确认是技能才走原投递通道；不确定回执不能恢复成可重发草稿。
+                    if (draft.trim() == text && attachments.toList() == outgoing) { draft = ""; attachments.clear() }
+                    try { repository.sendPrompt(sessionId, text, outgoing) }
+                    catch (error: PromptUnconfirmedException) {
+                        alert = context.getString(R.string.delivery_unconfirmed_title) to context.errorMessage(error)
+                        return@launch
+                    } catch (error: Exception) {
+                        if (draft.isBlank() && attachments.isEmpty()) { draft = text; attachments += outgoing }
+                        throw error
+                    }
+                } else if (command.action in listOf("model", "file", "permission", "feedback") && text == "/" + name) {
+                    if (draft.trim() == text) draft = ""
+                    presentCommand(command)
+                    return@launch
+                } else {
+                    check(command.action !in listOf("model", "file"))
+                    check(outgoing.isEmpty() || command.input?.attachments == true)
+                    val result = repository.executeCommand(sessionId, text, outgoing)
+                    if (result.result.kind != "success") {
+                        alert = context.getString(R.string.composer_commands_title) to commandResultMessage(context, result.result)
+                        return@launch
+                    }
+                    if (command.action == "export") {
+                        val directory = File(context.cacheDir, "command-exports").apply { mkdirs() }
+                        directory.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 86_400_000 }?.forEach { it.delete() }
+                        val output = repository.exportLogs(sessionId, File(directory, "dsh-session-" + UUID.randomUUID() + ".zip"))
+                        val uri = FileProvider.getUriForFile(context, context.packageName + ".files", output)
+                        val intent = Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM, uri)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        context.startActivity(Intent.createChooser(intent, context.getString(R.string.composer_commands_description_export)))
+                    } else {
+                        val message = commandResultMessage(context, result.result)
+                        alert = context.getString(R.string.composer_commands_title) to message
+                    }
+                }
+                if (draft.trim() == text && attachments.toList() == outgoing) { draft = ""; attachments.clear() }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { alert = context.getString(R.string.composer_commands_title) to context.getString(R.string.composer_commands_failed) }
+            finally { commandSending = false }
+        }
     }
 
     fun send() {
         val text = draft.trim()
         val outgoing = attachments.toList()
-        if ((text.isEmpty() && outgoing.isEmpty()) || pendingText != null) return
+        if ((text.isEmpty() && outgoing.isEmpty()) || pendingText != null || commandSending) return
+        if (capabilities?.commands == true && SessionCommandLine.name(text)?.let { it != chosenSkillName } == true) {
+            sendCommand(text, outgoing)
+            return
+        }
         pendingText = text
         pendingAttachments = outgoing
         draft = ""
@@ -433,9 +550,18 @@ fun SessionScreen(
 
         Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding()) {
             PromptComposer(
+                supportsSkills = connected && capabilities?.skills == true,
+                skillCatalogScope = "$sessionId/$skillsRevision/$connected",
+                onLoadSkills = { if (capabilities?.skills == true) repository.loadSkills(sessionId) else emptyList() },
+                onLoadCommands = if (connected && capabilities?.commands == true) ({ commandCatalog() }) else null,
+                onReadSkills = { force, cached -> if (capabilities?.skills == true) repository.loadSkills(sessionId, force, cached) else emptyList() },
+                onReadCommands = if (connected && capabilities?.commands == true) ({ force, cached -> commandCatalog(force, cached) }) else null,
+                onSelectCommand = ::openCommand,
+                onPickSkill = { chosenSkillName = it },
                 draft = draft,
                 onDraftChange = {
                     draft = it
+                    if (SessionCommandLine.name(it) != chosenSkillName) chosenSkillName = null
                     sendError = null
                 },
                 attachments = attachments,
@@ -464,7 +590,7 @@ fun SessionScreen(
                 focusRequester = focusRequester,
                 todoItems = summary?.todoItems.orEmpty(),
                 canSubmit = connected,
-                sending = pendingText != null,
+                sending = pendingText != null || commandSending,
                 running = running,
                 stopping = stopping,
                 onSend = ::send,
@@ -544,12 +670,25 @@ fun SessionScreen(
         )
     }
 
+    if (showsPermissionSheet) {
+        CommandPermissionDialog(load = { repository.loadPermissions(sessionId) }, select = { preset ->
+            val result = repository.executeCommand(sessionId, "/permission " + preset, emptyList(), expectedDefinitionId = "@deepseek-ai/dsh-permission-presets")
+            check(result.result.kind == "success")
+        }, onDismiss = { showsPermissionSheet = false; scope.launch { focusRequester.requestFocus() } })
+    }
+    if (showsFeedbackSheet) {
+        CommandFeedbackDialog(submit = { text, category -> repository.recordFeedback(sessionId, text, category) },
+            onDismiss = { showsFeedbackSheet = false; scope.launch { focusRequester.requestFocus() } })
+    }
+
     if (showsModelSheet) {
         ModelPickerSheet(
             catalog = models,
             loading = modelsLoading,
             loadError = modelsError,
-            onRefresh = ::loadModels,
+            onRefresh = { loadModels(force = true) },
+            onCheck = { loadModels() },
+            stale = modelsStale,
             onSelect = { selectModel(it) },
             onDismiss = {
                 showsModelSheet = false

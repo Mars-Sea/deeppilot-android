@@ -101,6 +101,7 @@ fun SettingsScreen(
     onEditHost: (String) -> Unit,
     onOpenIcons: () -> Unit,
     onOpenArchived: () -> Unit,
+    onReplayOnboarding: () -> Unit,
 ) {
     val p = palette
     val context = LocalContext.current
@@ -245,6 +246,9 @@ fun SettingsScreen(
                 SettingsRow(title = stringResource(R.string.settings_about_privacy)) {
                     Text(stringResource(R.string.settings_about_privacy_value), style = AppType.subheadline, color = p.secondary, maxLines = 1)
                 }
+                SettingsDivider()
+                // The post-pairing tour again; it records nothing and asks for no permission.
+                SettingsRow(title = stringResource(R.string.settings_about_onboarding), onClick = onReplayOnboarding) { Chevron() }
             }
         }
     }

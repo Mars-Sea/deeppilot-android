@@ -1,6 +1,9 @@
 package dev.hailab.deeppilot.bridge
 
 import android.graphics.Bitmap
+import java.io.File
+import java.util.Base64
+import dev.hailab.deeppilot.core.protocol.*
 import dev.hailab.deeppilot.attachments.AttachmentImages
 import dev.hailab.deeppilot.core.attachments.PromptAttachment
 import dev.hailab.deeppilot.core.attachments.promptDocuments
@@ -120,6 +123,7 @@ class BridgeRepository(
     private val scope: CoroutineScope,
     private val images: AttachmentImages,
     private val outbox: PromptOutboxStore,
+    private val catalogCache: dev.hailab.deeppilot.core.catalog.CatalogCache,
     private val drafts: DraftStore,
     private val cache: ConversationCache,
 ) {
@@ -128,6 +132,13 @@ class BridgeRepository(
     private val _host = MutableStateFlow(store.loadHost())
     val host: StateFlow<HostCredentials?> = _host.asStateFlow()
 
+    // 连接代次与目录失效共用序号，晚到结果不得进入新主机或新连接的候选面板。
+    @Volatile private var catalogGeneration = 0L
+    private val _modelRevision = MutableStateFlow(0L)
+    val modelRevision: StateFlow<Long> = _modelRevision.asStateFlow()
+    private val currentModelSelections = java.util.concurrent.ConcurrentHashMap<String, ModelSelection>()
+    private val _skillsRevision = MutableStateFlow(0L)
+    val skillsRevision: StateFlow<Long> = _skillsRevision.asStateFlow()
     private val _capabilities = MutableStateFlow<WelcomeCapabilities?>(null)
     val capabilities: StateFlow<WelcomeCapabilities?> = _capabilities.asStateFlow()
 
@@ -173,7 +184,16 @@ class BridgeRepository(
         // reconnect with an identical welcome is conflated away there, and the new
         // socket then never re-opened the conversation on screen.
         scope.launch { client.frames.collect { handle(it) } }
+        // Catalogs and model selections belong to one connection; resync itself happens on welcome.
+        scope.launch { client.state.collect { invalidateConnectionScopedState() } }
         _host.value?.let { client.start(it) }
+    }
+
+    private fun invalidateConnectionScopedState() {
+        catalogGeneration++
+        currentModelSelections.clear()
+        _modelRevision.update { it + 1 }
+        _skillsRevision.update { it + 1 }
     }
 
     // ---------- hosts ----------
@@ -255,6 +275,7 @@ class BridgeRepository(
         keys.delete(profileId)
         store.clearCursor(profileId)
         outbox.clear(profileId)
+        catalogCache.remove(profileId)
         drafts.remove(profileId)
         scope.launch {
             cache.remove(profileId)
@@ -279,6 +300,7 @@ class BridgeRepository(
         _questions.value = emptyList()
         _openSession.value = null
         _schedules.value = null
+        currentModelSelections.clear()
         notifier.cancelAll()
         commitRoster(next)
         val credentials = next.active?.credentials()
@@ -486,11 +508,93 @@ class BridgeRepository(
     }
 
     /** The host's model catalog for [sessionId] (§4); never built into the app. */
-    suspend fun loadModels(sessionId: String): SessionModels {
+    private suspend fun commandFrame(type: String, payload: kotlinx.serialization.json.JsonElement, timeout: Long = 12_000, progress: ((Envelope) -> Unit)? = null): Envelope {
+        requireAuthenticated()
+        if (_capabilities.value?.commands != true) throw UnsupportedFeatureException()
+        val expected = connection.value
+        val expectedHost = _host.value
+        val reply = client.request(type, payload, timeout, progress)
+        if (connection.value !== expected || _host.value != expectedHost) throw kotlinx.coroutines.CancellationException("指令所属连接已变化")
+        return reply
+    }
+    private fun catalogKey(sessionId: String, kind: String): dev.hailab.deeppilot.core.catalog.CatalogCache.Key {
+        val host = _host.value ?: throw NotConnectedException()
+        val binding = dev.hailab.deeppilot.core.catalog.CatalogCache.digest(listOf(host.host, host.audience, host.deviceId, host.tlsFingerprint.orEmpty()))
+        return dev.hailab.deeppilot.core.catalog.CatalogCache.Key(host.profileId, binding, sessionId, kind)
+    }
+    suspend fun loadCommands(sessionId: String, force: Boolean = false, cached: ((CommandCatalog, Boolean) -> Unit)? = null): CommandCatalog {
+        requireAuthenticated()
+        if (_capabilities.value?.commands != true) throw UnsupportedFeatureException()
+        val expected = connection.value; val host = _host.value
+        val catalog = catalogCache.load(catalogKey(sessionId, "commands"), catalogGeneration.toString(), CommandCatalog.serializer(), force,
+            onCached = { value, stale -> if (connection.value === expected && _host.value == host) cached?.invoke(value, stale) }) {
+            val reply = commandFrame("c2s.session.commands", BridgeJson.encodeToJsonElement(SessionRef.serializer(), SessionRef(sessionId)))
+            reply.decode(CommandCatalog.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+        }
+        if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("目录所属连接已变化")
+        return catalog
+    }
+    suspend fun executeCommand(sessionId: String, line: String, attachments: List<PromptAttachment>, expectedDefinitionId: String? = null): CommandExecution {
+        val parts = attachments.map { item -> CommandAttachment(
+            if (item.kind == PromptAttachment.Kind.Image) "image" else "document", item.name,
+            if (item.kind == PromptAttachment.Kind.Image) item.mediaType else "text/plain",
+            if (item.kind == PromptAttachment.Kind.Image) item.payload else Base64.getEncoder().encodeToString(item.payload.toByteArray(Charsets.UTF_8)),
+        ) }
+        return commandFrame("c2s.session.command", BridgeJson.encodeToJsonElement(CommandRequest.serializer(), CommandRequest(sessionId, line, parts, expectedDefinitionId)), 600_000)
+            .decode(CommandExecution.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+    }
+    suspend fun loadPermissions(sessionId: String): PermissionCatalog =
+        commandFrame("c2s.session.permissions", BridgeJson.encodeToJsonElement(SessionRef.serializer(), SessionRef(sessionId)))
+            .decode(PermissionCatalog.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+    suspend fun recordFeedback(sessionId: String, text: String, category: String) {
+        commandFrame("c2s.session.feedback", BridgeJson.encodeToJsonElement(FeedbackRequest.serializer(), FeedbackRequest(sessionId, text, category)))
+    }
+    suspend fun exportLogs(sessionId: String, output: File): File {
+        var index = 0
+        var bytes = 0L
+        try {
+            output.outputStream().use { stream ->
+                val reply = commandFrame("c2s.session.export", BridgeJson.encodeToJsonElement(SessionRef.serializer(), SessionRef(sessionId)), 600_000) { frame ->
+                    val chunk = frame.decode(ExportChunk.serializer()) ?: throw InvalidResponseException()
+                    val data = Base64.getDecoder().decode(chunk.data)
+                    if (chunk.index != index || data.size > 48 * 1024) throw InvalidResponseException()
+                    stream.write(data); bytes += data.size; index++
+                }
+                val done = reply.decode(ExportDone.serializer()) ?: throw InvalidResponseException()
+                if (done.sessionId != sessionId || done.chunks != index || done.bytes != bytes) throw InvalidResponseException()
+            }
+            return output
+        } catch (error: Throwable) { output.delete(); throw error }
+    }
+
+    suspend fun loadSkills(sessionId: String, force: Boolean = false, cached: ((List<SkillSummary>, Boolean) -> Unit)? = null): List<SkillSummary> {
+        requireAuthenticated()
+        if (_capabilities.value?.skills != true) throw UnsupportedFeatureException()
+        val expected = connection.value; val host = _host.value
+        val catalog = catalogCache.load(catalogKey(sessionId, "skills"), catalogGeneration.toString(), kotlinx.serialization.builtins.ListSerializer(SkillSummary.serializer()), force,
+            onCached = { value, stale -> if (connection.value === expected && _host.value == host) cached?.invoke(value, stale) }) {
+            val reply = client.request(FrameType.SESSION_SKILLS, SessionSkillsRequest.serializer(), SessionSkillsRequest(sessionId))
+            if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("目录所属连接已变化")
+            reply.decode(SessionSkills.serializer())?.takeIf { it.sessionId == sessionId }?.skills ?: throw InvalidResponseException()
+        }
+        if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("目录所属连接已变化")
+        return catalog
+    }
+
+    suspend fun loadModels(sessionId: String, force: Boolean = false, cached: ((SessionModels, Boolean) -> Unit)? = null): SessionModels {
         requireAuthenticated()
         if (_capabilities.value?.models != true) throw UnsupportedFeatureException()
-        val reply = client.request(FrameType.SESSION_MODELS, SessionModelsRequest.serializer(), SessionModelsRequest(sessionId))
-        return reply.decode(SessionModels.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+        val expected = connection.value; val host = _host.value
+        val value = catalogCache.load(catalogKey(sessionId, "models"), catalogGeneration.toString(), SessionModels.serializer(), force,
+            onCached = { value, stale -> if (connection.value === expected && _host.value == host) cached?.invoke(value.copy(current = currentModelSelections[sessionId] ?: value.current), stale) },
+            diskValue = { it.copy(current = ModelSelection("", ""), failures = emptyList()) }) {
+            val reply = client.request(FrameType.SESSION_MODELS, SessionModelsRequest.serializer(), SessionModelsRequest(sessionId))
+            if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("模型目录所属连接已变化")
+            reply.decode(SessionModels.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+        }
+        if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("模型目录所属连接已变化")
+        currentModelSelections[sessionId] = value.current
+        return value
     }
 
     /** Switches the session's route; returns what the host applied. */
@@ -502,8 +606,10 @@ class BridgeRepository(
             SelectModelRequest.serializer(),
             SelectModelRequest(sessionId, selection.provider, selection.model, selection.reasoningEffort?.takeIf { it.isNotEmpty() }),
         )
-        return reply.decode(SessionModelSelected.serializer())?.takeIf { it.sessionId == sessionId }?.selected
-            ?: throw InvalidResponseException()
+        val selected = reply.decode(SessionModelSelected.serializer())?.takeIf { it.sessionId == sessionId }?.selected ?: throw InvalidResponseException()
+        currentModelSelections[sessionId] = selected
+        catalogCache.invalidate(_host.value?.profileId, sessionId, setOf("models"))
+        return selected
     }
 
     /** One persisted conversation image, from the cache or read back from the host (§5). */
@@ -717,6 +823,7 @@ class BridgeRepository(
     private fun handle(envelope: Envelope) {
         when (envelope.type) {
             FrameType.WELCOME -> {
+                invalidateConnectionScopedState()
                 _capabilities.value = envelope.decode(Welcome.serializer())?.capabilities
                 refresh()
                 reconcileDeliveries()
@@ -732,6 +839,16 @@ class BridgeRepository(
             FrameType.SESSION_ARCHIVED -> envelope.decode(SessionRef.serializer())?.let { archived ->
                 _sessions.update { list -> list.filterNot { it.id == archived.sessionId } }
                 persistSessions()
+            }
+            FrameType.SKILLS_CHANGED, "s2c.commands.changed" -> {
+                val sessionId = envelope.decode(SkillsChanged.serializer())?.sessionId
+                catalogCache.invalidate(_host.value?.profileId, sessionId, setOf("skills", "commands"))
+                _skillsRevision.update { it + 1 }
+            }
+            "s2c.models.changed" -> envelope.decode(ModelsChanged.serializer())?.let { change ->
+                change.current?.let { currentModelSelections[change.sessionId] = it } ?: currentModelSelections.remove(change.sessionId)
+                catalogCache.invalidate(_host.value?.profileId, change.sessionId, setOf("models"))
+                _modelRevision.update { it + 1 }
             }
             FrameType.SESSIONS_SNAPSHOT -> envelope.decode(SessionsSnapshot.serializer())?.let { snapshot ->
                 _sessions.update { current ->

@@ -34,6 +34,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import dev.hailab.deeppilot.bridge.BridgeRepository
+import dev.hailab.deeppilot.core.onboarding.OnboardingMode
+import dev.hailab.deeppilot.ui.onboarding.OnboardingScreen
 import dev.hailab.deeppilot.ui.components.plainClickable
 import dev.hailab.deeppilot.ui.palette
 import kotlinx.coroutines.Job
@@ -144,6 +146,17 @@ fun MainShell(
                         onEditHost = onEditHost,
                         onOpenIcons = { nav.navigate(APP_ICON) { launchSingleTop = true } },
                         onOpenArchived = { nav.navigate(ARCHIVED) { launchSingleTop = true } },
+                        onReplayOnboarding = { nav.navigate(ONBOARDING_REPLAY) { launchSingleTop = true } },
+                    )
+                }
+                // The tour again, full screen: nothing is recorded and no permission is asked (the
+                // completion callback is empty and the screen is in replay mode). Back goes to the
+                // previous page, and from the first page pops back to Settings.
+                composable(ONBOARDING_REPLAY) {
+                    OnboardingScreen(
+                        mode = OnboardingMode.Replay,
+                        onComplete = {},
+                        onDismiss = { nav.popBackStack() },
                     )
                 }
                 composable(APP_ICON) { AppIconScreen(onBack = { nav.popBackStack() }) }
@@ -200,3 +213,4 @@ private const val SESSION = "session/{id}"
 private const val SETTINGS = "settings"
 private const val APP_ICON = "settings/icon"
 private const val ARCHIVED = "settings/archived"
+private const val ONBOARDING_REPLAY = "settings/onboarding"

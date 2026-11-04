@@ -54,6 +54,8 @@ object FrameType {
     const val SESSIONS_ARCHIVED = "c2s.sessions.archived"
     const val SESSION_UNARCHIVE = "c2s.session.unarchive"
 
+    const val SESSION_SKILLS = "c2s.session.skills"
+    const val SKILLS_CHANGED = "s2c.skills.changed"
     const val SESSION_MODELS = "c2s.session.models"
     const val SESSION_SELECT_MODEL = "c2s.session.selectModel"
     const val SESSION_ATTACHMENT = "c2s.session.attachment"
@@ -139,6 +141,8 @@ data class WelcomeCapabilities(
     val promptDelivery: Boolean = false,
     val notifyAllCategories: Boolean = false,
     val models: Boolean = false,
+    val skills: Boolean = false,
+    val commands: Boolean = false,
     val sessionManagement: Boolean = false,
     val sessionFork: Boolean = false,
     val sessionRestore: Boolean = false,

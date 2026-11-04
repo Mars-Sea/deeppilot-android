@@ -126,6 +126,7 @@ class BridgeClient(
     private var reconnectJob: Job? = null
     private var pingJob: Job? = null
     private val pending = HashMap<String, CompletableDeferred<Envelope>>()
+    private val progress = HashMap<String, (Envelope) -> Unit>()
 
     val currentCredentials: HostCredentials? get() = credentials
 
@@ -220,22 +221,23 @@ class BridgeClient(
         send(type, BridgeJson.encodeToJsonElement(serializer, payload))
 
     /** Request with a correlation id; returns the response envelope or throws [BridgeException]. */
-    suspend fun request(type: String, payload: JsonElement = JsonObject(emptyMap()), timeoutMillis: Long = 12_000): Envelope {
+    suspend fun request(type: String, payload: JsonElement = JsonObject(emptyMap()), timeoutMillis: Long = 12_000, onProgress: ((Envelope) -> Unit)? = null): Envelope {
         val id = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Envelope>()
         withContext(serial) {
             if (!authenticated) throw NotConnectedException()
             pending[id] = deferred
+            if (onProgress != null) progress[id] = onProgress
             if (!sendLocked(Envelope(type = type, id = id, ts = System.currentTimeMillis(), payload = payload))) {
                 pending.remove(id)
+                progress.remove(id)
                 throw NotConnectedException()
             }
         }
         val response = try {
             withTimeout(timeoutMillis) { deferred.await() }
-        } catch (e: TimeoutCancellationException) {
-            withContext(serial) { pending.remove(id) }
-            throw e
+        } finally {
+            withContext(kotlinx.coroutines.NonCancellable + serial) { pending.remove(id); progress.remove(id) }
         }
         if (response.type == FrameType.ERROR) {
             val error = response.decode(ErrorPayload.serializer())
@@ -330,8 +332,13 @@ class BridgeClient(
             // errors answer a fire-and-forget frame (a session.open that found nothing) and
             // must not take unrelated requests, such as a prompt send, down with them.
             if (envelope.decode(ErrorPayload.serializer())?.code == WireErrorCode.E_INTERNAL.name) failAllPending()
+        } else if (id != null && envelope.type == "s2c.session.export.chunk") {
+            try { progress[id]?.invoke(envelope) }
+            catch (error: Exception) { pending.remove(id)?.completeExceptionally(error); progress.remove(id) }
+            return
         } else if (id != null) {
             pending.remove(id)?.complete(envelope)
+            progress.remove(id)
         }
         when (envelope.type) {
             FrameType.AUTH_CHALLENGE -> answerChallenge(envelope.decode(AuthChallenge.serializer()))
@@ -424,6 +431,7 @@ class BridgeClient(
         if (pending.isEmpty()) return
         val waiters = pending.values.toList()
         pending.clear()
+        progress.clear()
         waiters.forEach { it.completeExceptionally(NotConnectedException()) }
     }
 

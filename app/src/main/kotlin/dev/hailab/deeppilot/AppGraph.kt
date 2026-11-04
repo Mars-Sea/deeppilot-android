@@ -8,8 +8,10 @@ import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.bridge.BridgeClient
 import dev.hailab.deeppilot.data.ConversationCache
 import dev.hailab.deeppilot.data.DeviceIdentity
+import dev.hailab.deeppilot.core.onboarding.OnboardingState
 import dev.hailab.deeppilot.data.DraftStore
 import dev.hailab.deeppilot.data.InstanceStore
+import dev.hailab.deeppilot.data.OnboardingPrefs
 import dev.hailab.deeppilot.data.PromptOutboxStore
 import dev.hailab.deeppilot.notify.Notifier
 import dev.hailab.deeppilot.security.DeviceKeys
@@ -50,10 +52,15 @@ class AppGraph(private val app: Application) {
         scope = scope,
         images = AttachmentImages(app.cacheDir),
         outbox = PromptOutboxStore(app),
+        catalogCache = dev.hailab.deeppilot.core.catalog.CatalogCache(java.io.File(app.cacheDir, "catalogs-v1"), scope),
         drafts = DraftStore(app, scope),
         cache = ConversationCache(app),
     )
     val preferences = AppPreferences(app)
+
+    /** Whether to show the post-pairing tour; decided per device, see [OnboardingState]. */
+    val onboardingPrefs = OnboardingPrefs(app)
+    val onboarding = OnboardingState(onboardingPrefs)
 
     fun start() {
         notifier.createChannels()

@@ -60,6 +60,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -203,12 +204,15 @@ fun ProminentButton(
 ) {
     val p = palette
     Row(
+        // [height] is a minimum: at large font scales the label wraps and the button grows with it
+        // instead of clipping the main action. At normal sizes the label is shorter than the
+        // minimum, so the height is exactly [height] as before.
         modifier = modifier
-            .height(height)
+            .heightIn(min = height)
             .clip(RoundedCornerShape(radius))
             .background(if (enabled) p.accent else p.foreground.copy(alpha = 0.08f))
             .plainClickable(enabled = enabled && !busy, onClick = onClick)
-            .padding(horizontal = AppSpacing.regular),
+            .padding(horizontal = AppSpacing.regular, vertical = AppSpacing.small),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
@@ -220,7 +224,7 @@ fun ProminentButton(
                 Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
             }
-            Text(text, style = AppType.body.copy(fontWeight = FontWeight.SemiBold), color = color)
+            Text(text, style = AppType.body.copy(fontWeight = FontWeight.SemiBold), color = color, textAlign = TextAlign.Center)
         }
     }
 }
