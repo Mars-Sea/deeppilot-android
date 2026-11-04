@@ -83,6 +83,45 @@ fun CommandFeedbackDialog(submit: suspend (String, String) -> Unit, onDismiss: (
         dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } })
 }
 
+/** iOS `CommandExportSheet`: full ZIP log or the conversation text as Markdown. */
+@Composable
+fun CommandExportDialog(export: suspend (dev.hailab.deeppilot.core.protocol.SessionExportFormat) -> Unit, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var format by remember { mutableStateOf(dev.hailab.deeppilot.core.protocol.SessionExportFormat.Zip) }
+    var busy by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    val options = listOf(
+        dev.hailab.deeppilot.core.protocol.SessionExportFormat.Zip to (R.string.composer_commands_export_zip to R.string.composer_commands_export_zip_detail),
+        dev.hailab.deeppilot.core.protocol.SessionExportFormat.Markdown to (R.string.composer_commands_export_markdown to R.string.composer_commands_export_markdown_detail),
+    )
+    AlertDialog(onDismissRequest = { if (!busy) onDismiss() }, title = { Text(stringResource(R.string.composer_commands_export_title)) },
+        text = { Column {
+            Text(stringResource(R.string.composer_commands_export_format), style = MaterialTheme.typography.labelMedium)
+            options.forEach { (value, labels) ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    RadioButton(selected = format == value, onClick = { format = value }, enabled = !busy)
+                    Text(stringResource(labels.first))
+                }
+            }
+            Text(stringResource(options.first { it.first == format }.second.second), style = MaterialTheme.typography.bodySmall)
+            if (busy) Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.composer_commands_exporting), style = MaterialTheme.typography.bodySmall)
+            }
+            if (failed) Text(stringResource(R.string.composer_commands_failed))
+        } }, confirmButton = { TextButton(enabled = !busy, onClick = {
+            busy = true; failed = false
+            scope.launch {
+                try { export(format); onDismiss() }
+                catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (_: Exception) { failed = true }
+                busy = false
+            }
+        }) { Text(stringResource(R.string.composer_commands_export_share)) } },
+        dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } })
+}
+
 @Composable
 private fun permissionName(option: PermissionOption): String = when (option.value) {
     "workspace-write" -> stringResource(R.string.composer_commands_permission_workspace_write)

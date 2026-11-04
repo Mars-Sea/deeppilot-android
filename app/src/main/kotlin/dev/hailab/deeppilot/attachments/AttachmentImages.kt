@@ -2,7 +2,6 @@ package dev.hailab.deeppilot.attachments
 
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
-import android.util.Base64
 import android.util.LruCache
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -26,8 +25,8 @@ class AttachmentImages(cacheRoot: File) {
     private val lock = Mutex()
     private val inflight = mutableMapOf<String, CompletableDeferred<Bitmap?>>()
 
-    /** Returns the image, fetching it with [fetch] (base64 bytes) only when no cache has it. */
-    suspend fun image(profileId: String, sessionId: String, attachmentId: String, fetch: suspend () -> String?): Bitmap? {
+    /** Returns the image, fetching its original bytes with [fetch] only when no cache has it. */
+    suspend fun image(profileId: String, sessionId: String, attachmentId: String, fetch: suspend () -> ByteArray?): Bitmap? {
         val file = fileFor(profileId, sessionId, attachmentId)
         val key = file.path
         memory.get(key)?.let { return it }
@@ -59,9 +58,8 @@ class AttachmentImages(cacheRoot: File) {
         }
     }
 
-    private suspend fun store(base64: String, file: File): Bitmap? = withContext(Dispatchers.IO) {
-        if (base64.length > MAX_BASE64_LENGTH) return@withContext null
-        val bytes = runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull() ?: return@withContext null
+    private suspend fun store(bytes: ByteArray, file: File): Bitmap? = withContext(Dispatchers.IO) {
+        if (bytes.isEmpty() || bytes.size > MAX_IMAGE_BYTES) return@withContext null
         val image = thumbnail(bytes) ?: return@withContext null
         runCatching {
             file.parentFile?.mkdirs()
@@ -101,7 +99,8 @@ class AttachmentImages(cacheRoot: File) {
     private companion object {
         const val MEMORY_BUDGET = 32 * 1024 * 1024
         const val DISK_BUDGET = 128L * 1024 * 1024
-        const val MAX_BASE64_LENGTH = 16 * 1024 * 1024
+        /** Same ceiling as the binary read-back (12 MiB originals). */
+        const val MAX_IMAGE_BYTES = 12 * 1024 * 1024
         const val THUMBNAIL_PIXELS = 900
         const val RETENTION_MILLIS = 30L * 24 * 3600 * 1000
     }

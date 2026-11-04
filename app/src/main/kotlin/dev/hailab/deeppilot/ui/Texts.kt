@@ -77,6 +77,8 @@ fun Context.errorMessage(error: Throwable): String = when (error) {
         WireErrorCode.E_BUSY -> getString(R.string.error_busy)
         WireErrorCode.E_FORBIDDEN -> getString(R.string.error_forbidden)
         WireErrorCode.E_NOT_FOUND -> getString(R.string.error_not_found)
+        WireErrorCode.E_TOO_LARGE -> getString(R.string.error_too_large)
+        WireErrorCode.E_STEER_UNAVAILABLE -> getString(R.string.error_steer_unavailable)
         else -> error.message ?: getString(R.string.error_generic)
     }
     else -> error.message ?: getString(R.string.error_generic)

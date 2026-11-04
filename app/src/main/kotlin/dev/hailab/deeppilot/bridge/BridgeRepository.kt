@@ -83,6 +83,14 @@ import dev.hailab.deeppilot.core.session.NotificationDeduper
 import dev.hailab.deeppilot.core.session.OpenSession
 import dev.hailab.deeppilot.core.session.SessionList
 import dev.hailab.deeppilot.core.session.SessionReducer
+import dev.hailab.deeppilot.core.session.TransientStream
+import dev.hailab.deeppilot.core.session.TransientStreams
+import dev.hailab.deeppilot.core.schedule.ScheduleMode
+import dev.hailab.deeppilot.core.transfer.AttachmentChunkAssembler
+import dev.hailab.deeppilot.core.transfer.ExportChunkWriter
+import dev.hailab.deeppilot.core.transfer.MalformedTransferException
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import dev.hailab.deeppilot.data.ConversationCache
 import dev.hailab.deeppilot.data.DeviceIdentity
 import dev.hailab.deeppilot.data.DraftStore
@@ -154,6 +162,18 @@ class BridgeRepository(
     private val _openSession = MutableStateFlow<OpenSession?>(null)
     val openSession: StateFlow<OpenSession?> = _openSession.asStateFlow()
 
+    /** Live assistant output of the open session (`assistantStream`); never persisted. */
+    private val streams = TransientStreams()
+    private val _transientStreams = MutableStateFlow<List<TransientStream>>(emptyList())
+    val transientStreams: StateFlow<List<TransientStream>> = _transientStreams.asStateFlow()
+
+    /** Plugin self-update of the connected computer (`pluginUpdate`). */
+    val pluginUpdate = PluginUpdater(client, scope)
+
+    /** Bumped on `s2c.schedule.changed`, so open host-level task lists reload. */
+    private val _scheduleRevision = MutableStateFlow(0L)
+    val scheduleRevision: StateFlow<Long> = _scheduleRevision.asStateFlow()
+
     private val _schedules = MutableStateFlow<ScheduleState?>(null)
     /** Automation tasks of the session whose task list was last requested. */
     val schedules: StateFlow<ScheduleState?> = _schedules.asStateFlow()
@@ -185,7 +205,14 @@ class BridgeRepository(
         // socket then never re-opened the conversation on screen.
         scope.launch { client.frames.collect { handle(it) } }
         // Catalogs and model selections belong to one connection; resync itself happens on welcome.
-        scope.launch { client.state.collect { invalidateConnectionScopedState() } }
+        scope.launch {
+            client.state.collect { state ->
+                invalidateConnectionScopedState()
+                // Unfinished live output dies with the connection (no replay for deltas).
+                if (state !is ConnectionState.Authenticated) clearStreams()
+                pluginUpdate.updateConnection(_host.value?.profileId, (state as? ConnectionState.Authenticated)?.welcome)
+            }
+        }
         _host.value?.let { client.start(it) }
     }
 
@@ -381,6 +408,7 @@ class BridgeRepository(
         visibility.setViewingSession(sessionId)
         notifier.cancelSession(sessionId)
         if (_openSession.value?.sessionId != sessionId) {
+            clearStreams()
             val running = _sessions.value.firstOrNull { it.id == sessionId }?.status == "running"
             _openSession.value = OpenSession(sessionId, turnRunning = running)
             _host.value?.let { restoreConversation(it.profileId, sessionId) }
@@ -390,7 +418,10 @@ class BridgeRepository(
 
     fun closeSession(sessionId: String) {
         if (visibility.viewingSession.value == sessionId) visibility.setViewingSession(null)
-        if (_openSession.value?.sessionId == sessionId) _openSession.value = null
+        if (_openSession.value?.sessionId == sessionId) {
+            _openSession.value = null
+            clearStreams()
+        }
         scope.launch { client.send(FrameType.SESSION_CLOSE, SessionRef.serializer(), SessionRef(sessionId)) }
     }
 
@@ -549,19 +580,34 @@ class BridgeRepository(
     suspend fun recordFeedback(sessionId: String, text: String, category: String) {
         commandFrame("c2s.session.feedback", BridgeJson.encodeToJsonElement(FeedbackRequest.serializer(), FeedbackRequest(sessionId, text, category)))
     }
-    suspend fun exportLogs(sessionId: String, output: File): File {
-        var index = 0
-        var bytes = 0L
+    /** Whether the bridge can export the conversation text as Markdown (`sessionMarkdown`). */
+    val supportsMarkdownExport: Boolean get() = _capabilities.value?.sessionMarkdown == true
+
+    /**
+     * Streams a session export into [output]: the full ZIP log, or the conversation
+     * text as Markdown. Binary chunks when the bridge offers them; partial files are deleted.
+     */
+    suspend fun exportSession(sessionId: String, output: File, format: SessionExportFormat = SessionExportFormat.Zip): File {
+        // Older bridges ignore an unknown format and send a ZIP, so never ask them for Markdown.
+        if (format == SessionExportFormat.Markdown && !supportsMarkdownExport) throw UnsupportedFeatureException()
+        val binary = _capabilities.value?.binaryFrames == true
         try {
             output.outputStream().use { stream ->
-                val reply = commandFrame("c2s.session.export", BridgeJson.encodeToJsonElement(SessionRef.serializer(), SessionRef(sessionId)), 600_000) { frame ->
-                    val chunk = frame.decode(ExportChunk.serializer()) ?: throw InvalidResponseException()
-                    val data = Base64.getDecoder().decode(chunk.data)
-                    if (chunk.index != index || data.size > 48 * 1024) throw InvalidResponseException()
-                    stream.write(data); bytes += data.size; index++
+                val writer = ExportChunkWriter(stream, binary)
+                val request = ExportRequest(
+                    sessionId,
+                    format = format.wire.takeIf { format != SessionExportFormat.Zip },
+                    binary = true.takeIf { binary },
+                )
+                val reply = try {
+                    commandFrame(FrameType.SESSION_EXPORT, BridgeJson.encodeToJsonElement(ExportRequest.serializer(), request), 600_000) { writer.append(it) }
+                } catch (_: MalformedTransferException) {
+                    throw InvalidResponseException()
                 }
                 val done = reply.decode(ExportDone.serializer()) ?: throw InvalidResponseException()
-                if (done.sessionId != sessionId || done.chunks != index || done.bytes != bytes) throw InvalidResponseException()
+                if (done.sessionId != sessionId || done.chunks != writer.chunks || done.bytes != writer.bytes || !format.accepts(done.mediaType)) {
+                    throw InvalidResponseException()
+                }
             }
             return output
         } catch (error: Throwable) { output.delete(); throw error }
@@ -617,13 +663,26 @@ class BridgeRepository(
         val profileId = _host.value?.profileId ?: return null
         return images.image(profileId, sessionId, attachmentId) {
             if (connection.value !is ConnectionState.Authenticated) return@image null
+            if (_capabilities.value?.binaryFrames == true) {
+                // Raw 256 KiB chunks, no base64 and no single-frame ceiling (§1.1).
+                val assembler = AttachmentChunkAssembler()
+                val ack = client.request(
+                    FrameType.SESSION_ATTACHMENT,
+                    BridgeJson.encodeToJsonElement(AttachmentRequest.serializer(), AttachmentRequest(sessionId, attachmentId, binary = true)),
+                    timeoutMillis = 60_000,
+                    onProgress = { assembler.append(it) },
+                )
+                return@image assembler.finish(ack)
+            }
+            // maxFrameBytes lifts the bridge's 1 MiB default; it still caps text frames at 2 MiB (E_TOO_LARGE).
             val reply = client.request(
                 FrameType.SESSION_ATTACHMENT,
                 AttachmentRequest.serializer(),
-                AttachmentRequest(sessionId, attachmentId),
+                AttachmentRequest(sessionId, attachmentId, maxFrameBytes = BridgeClient.MAX_INBOUND_FRAME_BYTES),
                 timeoutMillis = 30_000,
             )
-            reply.decode(AttachmentData.serializer())?.data?.takeIf { it.isNotEmpty() }
+            val base64 = reply.decode(AttachmentData.serializer())?.data?.takeIf { it.isNotEmpty() && it.length <= MAX_ATTACHMENT_BASE64 }
+            base64?.let { runCatching { Base64.getMimeDecoder().decode(it) }.getOrNull() }
         }
     }
 
@@ -653,6 +712,7 @@ class BridgeRepository(
     suspend fun cancelTurn(sessionId: String) {
         requireAuthenticated()
         client.request(FrameType.SESSION_CANCEL, SessionRef.serializer(), SessionRef(sessionId))
+        if (_openSession.value?.sessionId == sessionId) finishStreams(null)
     }
 
     suspend fun respondApproval(requestId: String, allow: Boolean) {
@@ -809,6 +869,68 @@ class BridgeRepository(
         }
     }
 
+    // ---------- host-level schedules (schedulesHost) ----------
+
+    /** Which schedule frames this host takes; host-level ones win when both are offered. */
+    val scheduleMode: ScheduleMode
+        get() = ScheduleMode.resolve(_capabilities.value?.schedules == true, _capabilities.value?.schedulesHost == true)
+
+    suspend fun hostSchedules(active: Boolean?, offset: Int, limit: Int = dev.hailab.deeppilot.core.schedule.HostScheduleList.PAGE_SIZE): HostScheduleSnapshot =
+        hostScheduleRequest(FrameType.SCHEDULE_HOST_LIST, HostScheduleListRequest.serializer(), HostScheduleListRequest(active, limit, offset))
+            .decode(HostScheduleSnapshot.serializer()) ?: throw InvalidResponseException()
+
+    suspend fun hostSchedule(id: String): HostScheduleTask =
+        hostScheduleRequest(FrameType.SCHEDULE_HOST_VIEW, HostScheduleViewRequest.serializer(), HostScheduleViewRequest(id))
+            .decode(HostScheduleTaskPayload.serializer())?.task?.takeIf { it.id == id } ?: throw InvalidResponseException()
+
+    suspend fun createHostSchedule(title: String, prompt: String, timing: HostScheduleTiming, target: HostScheduleTarget?): HostScheduleTask {
+        val body = HostScheduleCreate(ClientRequestId.make(), title, prompt, timing, target)
+        return hostScheduleUpdated(FrameType.SCHEDULE_HOST_CREATE, HostScheduleCreate.serializer(), body, body.clientRequestId).task
+            ?: throw InvalidResponseException()
+    }
+
+    /** Edits [task]; the host refuses with E_BUSY when someone changed it since it was read. */
+    suspend fun editHostSchedule(task: HostScheduleTask, patch: HostSchedulePatch): HostScheduleTask {
+        if (patch.isEmpty) return task
+        val body = HostScheduleEdit(ClientRequestId.make(), task.id, task.updatedAt, "update", patch)
+        return hostScheduleUpdated(FrameType.SCHEDULE_HOST_EDIT, HostScheduleEdit.serializer(), body, body.clientRequestId).task
+            ?: throw InvalidResponseException()
+    }
+
+    suspend fun deleteHostSchedule(task: HostScheduleTask) {
+        val body = HostScheduleEdit(ClientRequestId.make(), task.id, task.updatedAt, "delete")
+        val done = hostScheduleUpdated(FrameType.SCHEDULE_HOST_EDIT, HostScheduleEdit.serializer(), body, body.clientRequestId)
+        if (!done.deleted) throw InvalidResponseException()
+    }
+
+    /** Delivers [task] once now. Never retried: the result may be unknown. */
+    suspend fun runHostSchedule(task: HostScheduleTask): HostScheduleTask {
+        val body = HostScheduleRun(ClientRequestId.make(), task.id)
+        return hostScheduleUpdated(FrameType.SCHEDULE_HOST_RUN, HostScheduleRun.serializer(), body, body.clientRequestId).task ?: task
+    }
+
+    /** Minimum interval between deliveries that create a session; display only. */
+    suspend fun hostScheduleLimits(): HostScheduleLimits =
+        hostScheduleRequest(FrameType.SCHEDULE_HOST_LIMITS, JsonObject(emptyMap()))
+            .decode(HostScheduleLimits.serializer()) ?: throw InvalidResponseException()
+
+    suspend fun hostScheduleHistory(taskId: String, before: String? = null): ScheduleHistory =
+        hostScheduleRequest(FrameType.SCHEDULE_HISTORY, HostScheduleHistoryRequest.serializer(), HostScheduleHistoryRequest(taskId, before = before))
+            .decode(ScheduleHistoryPayload.serializer())?.history?.takeIf { it.id == taskId } ?: throw InvalidResponseException()
+
+    private suspend fun <T> hostScheduleRequest(type: String, serializer: kotlinx.serialization.KSerializer<T>, payload: T): Envelope =
+        hostScheduleRequest(type, BridgeJson.encodeToJsonElement(serializer, payload))
+
+    private suspend fun hostScheduleRequest(type: String, payload: kotlinx.serialization.json.JsonElement): Envelope {
+        requireAuthenticated()
+        if (_capabilities.value?.schedulesHost != true) throw UnsupportedFeatureException()
+        return client.request(type, payload)
+    }
+
+    private suspend fun <T> hostScheduleUpdated(type: String, serializer: kotlinx.serialization.KSerializer<T>, payload: T, requestId: String): HostScheduleUpdated =
+        hostScheduleRequest(type, serializer, payload).decode(HostScheduleUpdated.serializer())
+            ?.takeIf { it.clientRequestId == requestId } ?: throw InvalidResponseException()
+
     private fun requireSchedules() {
         requireAuthenticated()
         if (_capabilities.value?.schedules != true) throw UnsupportedFeatureException()
@@ -829,7 +951,15 @@ class BridgeRepository(
                 reconcileDeliveries()
             }
             FrameType.RESYNC -> refresh()
-            FrameType.SCHEDULE_CHANGED -> _schedules.value?.let { loadSchedules(it.sessionId) }
+            FrameType.SCHEDULE_CHANGED -> {
+                _schedules.value?.let { loadSchedules(it.sessionId) }
+                _scheduleRevision.update { it + 1 }
+            }
+            FrameType.SESSION_DELTA -> envelope.decode(SessionDelta.serializer())?.let { delta ->
+                if (_capabilities.value?.assistantStream != true || _openSession.value?.sessionId != delta.sessionId) return@let
+                synchronized(streams) { if (streams.receive(delta)) _transientStreams.value = streams.streams }
+            }
+            FrameType.PLUGIN_UPDATE_PROGRESS -> envelope.decode(PluginUpdateProgress.serializer())?.let { pluginUpdate.receive(it) }
             FrameType.SESSION_RENAMED -> envelope.decode(SessionRenamed.serializer())?.let { renamed ->
                 val id = renamed.sessionId ?: return@let
                 val title = renamed.title ?: return@let
@@ -840,12 +970,12 @@ class BridgeRepository(
                 _sessions.update { list -> list.filterNot { it.id == archived.sessionId } }
                 persistSessions()
             }
-            FrameType.SKILLS_CHANGED, "s2c.commands.changed" -> {
+            FrameType.SKILLS_CHANGED, FrameType.COMMANDS_CHANGED -> {
                 val sessionId = envelope.decode(SkillsChanged.serializer())?.sessionId
                 catalogCache.invalidate(_host.value?.profileId, sessionId, setOf("skills", "commands"))
                 _skillsRevision.update { it + 1 }
             }
-            "s2c.models.changed" -> envelope.decode(ModelsChanged.serializer())?.let { change ->
+            FrameType.MODELS_CHANGED -> envelope.decode(ModelsChanged.serializer())?.let { change ->
                 change.current?.let { currentModelSelections[change.sessionId] = it } ?: currentModelSelections.remove(change.sessionId)
                 catalogCache.invalidate(_host.value?.profileId, change.sessionId, setOf("models"))
                 _modelRevision.update { it + 1 }
@@ -886,6 +1016,7 @@ class BridgeRepository(
                 persistConversation(page.sessionId)
             }
             FrameType.SESSION_EVENT -> envelope.decode(SessionEvent.serializer())?.let { event ->
+                if (_openSession.value?.sessionId == event.sessionId) retireStreams(event)
                 _openSession.update { open ->
                     if (open == null || open.sessionId != event.sessionId) open
                     else SessionReducer.reduce(open, event).state
@@ -917,6 +1048,27 @@ class BridgeRepository(
             FrameType.PENDING_CLEARED -> envelope.decode(PendingCleared.serializer())?.let { clearPending(it.requestId) }
             FrameType.NOTIFY -> envelope.decode(Notify.serializer())?.let { show(it) }
         }
+    }
+
+    /** The formal answer replaces its live stream; the end of a turn drops any that are left. */
+    private fun retireStreams(event: SessionEvent) {
+        when (event.kind) {
+            "turn.end" -> finishStreams(null)
+            "message.final" -> {
+                val data = event.data as? JsonObject ?: return
+                if ((data["role"] as? JsonPrimitive)?.content != "assistant") return
+                finishStreams((data["streamId"] as? JsonPrimitive)?.content?.takeIf { it.isNotEmpty() })
+            }
+        }
+    }
+
+    private fun finishStreams(streamId: String?) = synchronized(streams) {
+        if (streams.finish(streamId)) _transientStreams.value = streams.streams
+    }
+
+    private fun clearStreams() = synchronized(streams) {
+        streams.clear()
+        _transientStreams.value = emptyList()
     }
 
     private fun clearPending(requestId: String) {
@@ -958,6 +1110,7 @@ class BridgeRepository(
             WireErrorCode.E_UNSUPPORTED,
         )
         const val TAIL_COUNT = 60
+        const val MAX_ATTACHMENT_BASE64 = 16 * 1024 * 1024
         const val CACHE_WRITE_DELAY_MILLIS = 800L
     }
 }

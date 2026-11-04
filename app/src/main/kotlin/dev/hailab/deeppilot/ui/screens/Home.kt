@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.WarningAmber
@@ -118,6 +119,7 @@ fun WorkbenchHome(
     val questions by repository.questions.collectAsStateWithLifecycle()
     val p = palette
     var refreshing by remember { mutableStateOf(false) }
+    var showsSchedules by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize().background(p.background)) {
@@ -125,8 +127,15 @@ fun WorkbenchHome(
             leading = {
                 BarIconButton(Icons.Filled.Menu, stringResource(R.string.a11y_open_sidebar), onOpenDrawer)
             },
+            trailing = {
+                // 与 iOS 一致：全局「自动化任务」入口始终显示，旧宿主在页内提示升级。
+                BarIconButton(Icons.Outlined.History, stringResource(R.string.schedule_title), { showsSchedules = true })
+            },
             principal = { HomeConnectionStatus(connection) },
         )
+        if (showsSchedules) {
+            HostScheduleSheet(repository = repository, filterSessionId = null, onDismiss = { showsSchedules = false })
+        }
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {

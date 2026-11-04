@@ -90,6 +90,8 @@ import dev.hailab.deeppilot.core.protocol.PendingApproval
 import dev.hailab.deeppilot.core.protocol.PendingQuestion
 import dev.hailab.deeppilot.core.protocol.SessionModels
 import dev.hailab.deeppilot.core.session.Timeline
+import dev.hailab.deeppilot.core.protocol.SessionExportFormat
+import dev.hailab.deeppilot.core.schedule.ScheduleMode
 import dev.hailab.deeppilot.ui.AppRadius
 import dev.hailab.deeppilot.ui.AppType
 import dev.hailab.deeppilot.ui.attempt
@@ -126,6 +128,9 @@ fun SessionScreen(
 
     val state = open?.takeIf { it.sessionId == sessionId }
     val rows = remember(state?.messages) { Timeline.group(state?.messages.orEmpty()) }
+    // Live output (assistantStream): its own rows after the formal timeline, replaced by message.final.
+    val liveStreams by repository.transientStreams.collectAsStateWithLifecycle()
+    val liveRows = remember(liveStreams) { liveStreams.map { stream -> stream.id to Timeline.group(stream.presentations) } }
     val summary = sessions.firstOrNull { it.id == sessionId }
     val title = summary?.title?.ifBlank { null } ?: stringResource(R.string.conversation_untitled)
     val connected = connection is ConnectionState.Authenticated
@@ -154,10 +159,12 @@ fun SessionScreen(
     }
     val capabilities by repository.capabilities.collectAsStateWithLifecycle()
     val skillsRevision by repository.skillsRevision.collectAsStateWithLifecycle()
-    val supportsSchedules = capabilities?.schedules == true
+    val scheduleMode = ScheduleMode.resolve(capabilities?.schedules == true, capabilities?.schedulesHost == true)
+    // 旧宿主用会话级数组，宿主级 Host 用过滤到本会话 target 的新帧；任一可用都保留入口。
+    val supportsSchedules = scheduleMode != ScheduleMode.Unavailable
     val supportsFork = capabilities?.sessionFork == true
-    LaunchedEffect(sessionId, connected, supportsSchedules) {
-        if (connected && supportsSchedules) repository.loadSchedules(sessionId)
+    LaunchedEffect(sessionId, connected, scheduleMode) {
+        if (connected && scheduleMode == ScheduleMode.Legacy) repository.loadSchedules(sessionId)
     }
 
     // Pending approval/question half sheet, with a chip to bring back a dismissed one.
@@ -191,7 +198,8 @@ fun SessionScreen(
     var layoutTick by remember { mutableIntStateOf(0) }
     val tail = state?.messages?.lastOrNull()
     val tailKey = tail?.let { it.seq to (it.text?.length ?: 0) + (it.thinking?.length ?: 0) }
-    LaunchedEffect(tailKey, pendingText, layoutTick, rows.size) {
+    val liveLength = liveStreams.sumOf { it.text.length + it.thinking.length }
+    LaunchedEffect(tailKey, pendingText, layoutTick, rows.size, liveLength) {
         if (stickToBottom && listState.layoutInfo.totalItemsCount > 0) {
             listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
             listState.scrollBy(1_000_000f)
@@ -273,6 +281,18 @@ fun SessionScreen(
     var showsModelSheet by remember { mutableStateOf(false) }
     var showsPermissionSheet by remember { mutableStateOf(false) }
     var showsFeedbackSheet by remember { mutableStateOf(false) }
+    var showsExportSheet by remember { mutableStateOf(false) }
+    /** Exports into the app cache and hands the file to the system share sheet. */
+    suspend fun exportAndShare(format: SessionExportFormat) {
+        val directory = File(context.cacheDir, "command-exports").apply { mkdirs() }
+        directory.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 86_400_000 }?.forEach { it.delete() }
+        val output = repository.exportSession(sessionId, File(directory, "dsh-session-" + UUID.randomUUID() + "." + format.fileExtension), format)
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".files", output)
+        val type = if (format == SessionExportFormat.Markdown) "text/markdown" else "application/zip"
+        val intent = Intent(Intent.ACTION_SEND).setType(type).putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(Intent.createChooser(intent, context.getString(R.string.composer_commands_export_title)))
+    }
     var commandSending by remember(sessionId) { mutableStateOf(false) }
     var chosenSkillName by remember(sessionId) { mutableStateOf<String?>(null) }
     LaunchedEffect(skillsRevision) {
@@ -383,13 +403,9 @@ fun SessionScreen(
                         return@launch
                     }
                     if (command.action == "export") {
-                        val directory = File(context.cacheDir, "command-exports").apply { mkdirs() }
-                        directory.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 86_400_000 }?.forEach { it.delete() }
-                        val output = repository.exportLogs(sessionId, File(directory, "dsh-session-" + UUID.randomUUID() + ".zip"))
-                        val uri = FileProvider.getUriForFile(context, context.packageName + ".files", output)
-                        val intent = Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM, uri)
-                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        context.startActivity(Intent.createChooser(intent, context.getString(R.string.composer_commands_description_export)))
+                        // With Markdown on offer the user picks a format first, as on iOS.
+                        if (repository.supportsMarkdownExport) showsExportSheet = true
+                        else exportAndShare(SessionExportFormat.Zip)
                     } else {
                         val message = commandResultMessage(context, result.result)
                         alert = context.getString(R.string.composer_commands_title) to message
@@ -459,13 +475,18 @@ fun SessionScreen(
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { SmallSpinner() }
                     }
                 }
-                if (rows.isEmpty() && pendingText == null && pendingSends.isEmpty()) {
+                if (rows.isEmpty() && pendingText == null && pendingSends.isEmpty() && liveStreams.isEmpty()) {
                     item(key = "empty") {
                         if (state?.loaded != true) ConversationSkeleton() else EmptyConversation()
                     }
                 }
                 items(rows, key = { it.key }) { row ->
                     TimelineRow(row, sessionId, repository, onFork = if (supportsFork) ::fork else null) { layoutTick++ }
+                }
+                liveRows.forEach { (streamId, streamRows) ->
+                    items(streamRows, key = { "transient-$streamId-${it.key}" }) { row ->
+                        TimelineRow(row, sessionId, repository, onFork = null) { layoutTick++ }
+                    }
                 }
                 // Sends from earlier that the host never confirmed (the in-flight one is below).
                 items(
@@ -676,6 +697,9 @@ fun SessionScreen(
             check(result.result.kind == "success")
         }, onDismiss = { showsPermissionSheet = false; scope.launch { focusRequester.requestFocus() } })
     }
+    if (showsExportSheet) {
+        CommandExportDialog(export = { exportAndShare(it) }, onDismiss = { showsExportSheet = false })
+    }
     if (showsFeedbackSheet) {
         CommandFeedbackDialog(submit = { text, category -> repository.recordFeedback(sessionId, text, category) },
             onDismiss = { showsFeedbackSheet = false; scope.launch { focusRequester.requestFocus() } })
@@ -711,7 +735,11 @@ fun SessionScreen(
     }
 
     if (showsSchedules) {
-        ScheduleListSheet(repository = repository, sessionId = sessionId, onDismiss = { showsSchedules = false })
+        if (scheduleMode == ScheduleMode.Host) {
+            HostScheduleSheet(repository = repository, filterSessionId = sessionId, onDismiss = { showsSchedules = false })
+        } else {
+            ScheduleListSheet(repository = repository, sessionId = sessionId, onDismiss = { showsSchedules = false })
+        }
     }
 
     if (showsTodos) {
