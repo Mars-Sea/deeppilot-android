@@ -33,6 +33,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -119,6 +120,8 @@ fun ModelPickerSheet(
     onRefresh: () -> Unit,
     onSelect: suspend (ModelSelection) -> Unit,
     onDismiss: () -> Unit,
+    onCheck: (() -> Unit)? = null,
+    stale: Boolean = false,
 ) {
     val p = palette
     val context = LocalContext.current
@@ -128,7 +131,7 @@ fun ModelPickerSheet(
     var selecting by remember { mutableStateOf<ModelSelection?>(null) }
     var actionError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) { if (catalog == null && !loading) onRefresh() }
+    LaunchedEffect(Unit) { if (!loading) { if (onCheck != null) onCheck() else if (catalog == null) onRefresh() } }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -145,9 +148,16 @@ fun ModelPickerSheet(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 14.dp),
             )
             Divider()
-            SearchField(query, { query = it })
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { SearchField(query, { query = it }) }
+                TextButton(onClick = onRefresh) { Text(stringResource(R.string.catalog_refresh)) }
+            }
             Divider()
 
+            if (catalog != null && (stale || loadError != null)) Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(if (loading) R.string.catalog_updating else R.string.catalog_previous), style = AppType.caption, color = p.secondary, modifier = Modifier.weight(1f))
+                TextButton(onClick = onRefresh) { Text(stringResource(R.string.catalog_refresh)) }
+            }
             when {
                 catalog != null -> {
                     val groups = ModelSearch.groups(catalog, query)

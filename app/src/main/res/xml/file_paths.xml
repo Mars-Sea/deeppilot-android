@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- Photos taken for a prompt attachment; nothing else is shared. -->
+    <!-- 相机与用户显式导出的日志分别限定到独立缓存目录。 -->
     <cache-path name="camera" path="camera/" />
+    <cache-path name="command-exports" path="command-exports/" />
 </paths>

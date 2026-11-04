@@ -216,7 +216,7 @@ fun ScheduleListSheet(repository: BridgeRepository, sessionId: String, onDismiss
                     onCancel = { page = SchedulePage.Tasks },
                     onSave = { title, prompt, create -> save(current.task, title, prompt, create) },
                 )
-                is SchedulePage.History -> ScheduleHistoryPage(repository, sessionId, current.task) { page = SchedulePage.Tasks }
+                is SchedulePage.History -> ScheduleHistoryPage(current.task.id, { repository.loadScheduleHistory(sessionId, current.task.id) }) { page = SchedulePage.Tasks }
             }
         }
     }
@@ -243,7 +243,7 @@ fun ScheduleListSheet(repository: BridgeRepository, sessionId: String, onDismiss
 
 /** The sheet's inline navigation bar: a text button, a centered title, optional trailing items. */
 @Composable
-private fun SheetBar(
+internal fun SheetBar(
     title: String,
     leading: Pair<String, () -> Unit>?,
     trailing: @Composable () -> Unit = {},
@@ -268,7 +268,7 @@ private fun SheetBar(
 
 /** iOS `ContentUnavailableView` with the clock symbol. */
 @Composable
-private fun EmptyState(title: String, description: String?) {
+internal fun EmptyState(title: String, description: String?) {
     val p = palette
     Box(Modifier.fillMaxSize().padding(horizontal = 32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -473,13 +473,13 @@ private fun ColumnScope.ScheduleEditor(
 }
 
 /** 1 = Sunday … 7 = Saturday, as the iOS editor numbers them, in the narrow local form. */
-private fun weekdayLabel(weekday: Int): String {
+internal fun weekdayLabel(weekday: Int): String {
     val day = DayOfWeek.SUNDAY.plus((weekday - 1).toLong())
     return day.getDisplayName(TextStyle.NARROW_STANDALONE, Locale.getDefault())
 }
 
 @Composable
-private fun FormField(
+internal fun FormField(
     value: String,
     onChange: (String) -> Unit,
     placeholder: String,
@@ -511,7 +511,7 @@ private fun FormField(
 
 /** iOS `Stepper`: a − / + capsule. */
 @Composable
-private fun Stepper(canDecrease: Boolean, canIncrease: Boolean, onDecrease: () -> Unit, onIncrease: () -> Unit) {
+internal fun Stepper(canDecrease: Boolean, canIncrease: Boolean, onDecrease: () -> Unit, onIncrease: () -> Unit) {
     val p = palette
     Row(
         Modifier.background(p.secondaryFill, RoundedCornerShape(8.dp)),
@@ -529,15 +529,15 @@ private fun Stepper(canDecrease: Boolean, canIncrease: Boolean, onDecrease: () -
 
 /** iOS `ScheduleHistoryView`: when each run was delivered and what it said. */
 @Composable
-private fun ColumnScope.ScheduleHistoryPage(repository: BridgeRepository, sessionId: String, task: ScheduleTask, onDone: () -> Unit) {
+internal fun ColumnScope.ScheduleHistoryPage(taskId: String, load: suspend () -> ScheduleHistory, onDone: () -> Unit) {
     val p = palette
     val context = LocalContext.current
-    var history by remember(task.id) { mutableStateOf<ScheduleHistory?>(null) }
-    var loading by remember(task.id) { mutableStateOf(true) }
-    var failure by remember(task.id) { mutableStateOf<String?>(null) }
-    LaunchedEffect(task.id) {
+    var history by remember(taskId) { mutableStateOf<ScheduleHistory?>(null) }
+    var loading by remember(taskId) { mutableStateOf(true) }
+    var failure by remember(taskId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(taskId) {
         var loaded: ScheduleHistory? = null
-        val error = attempt { loaded = repository.loadScheduleHistory(sessionId, task.id) }
+        val error = attempt { loaded = load() }
         history = loaded
         loading = false
         if (error != null) failure = context.errorMessage(error)

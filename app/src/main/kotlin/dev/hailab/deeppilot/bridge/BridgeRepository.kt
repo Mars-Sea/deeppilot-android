@@ -1,6 +1,9 @@
 package dev.hailab.deeppilot.bridge
 
 import android.graphics.Bitmap
+import java.io.File
+import java.util.Base64
+import dev.hailab.deeppilot.core.protocol.*
 import dev.hailab.deeppilot.attachments.AttachmentImages
 import dev.hailab.deeppilot.core.attachments.PromptAttachment
 import dev.hailab.deeppilot.core.attachments.promptDocuments
@@ -80,6 +83,14 @@ import dev.hailab.deeppilot.core.session.NotificationDeduper
 import dev.hailab.deeppilot.core.session.OpenSession
 import dev.hailab.deeppilot.core.session.SessionList
 import dev.hailab.deeppilot.core.session.SessionReducer
+import dev.hailab.deeppilot.core.session.TransientStream
+import dev.hailab.deeppilot.core.session.TransientStreams
+import dev.hailab.deeppilot.core.schedule.ScheduleMode
+import dev.hailab.deeppilot.core.transfer.AttachmentChunkAssembler
+import dev.hailab.deeppilot.core.transfer.ExportChunkWriter
+import dev.hailab.deeppilot.core.transfer.MalformedTransferException
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import dev.hailab.deeppilot.data.ConversationCache
 import dev.hailab.deeppilot.data.DeviceIdentity
 import dev.hailab.deeppilot.data.DraftStore
@@ -120,6 +131,7 @@ class BridgeRepository(
     private val scope: CoroutineScope,
     private val images: AttachmentImages,
     private val outbox: PromptOutboxStore,
+    private val catalogCache: dev.hailab.deeppilot.core.catalog.CatalogCache,
     private val drafts: DraftStore,
     private val cache: ConversationCache,
 ) {
@@ -128,6 +140,13 @@ class BridgeRepository(
     private val _host = MutableStateFlow(store.loadHost())
     val host: StateFlow<HostCredentials?> = _host.asStateFlow()
 
+    // 连接代次与目录失效共用序号，晚到结果不得进入新主机或新连接的候选面板。
+    @Volatile private var catalogGeneration = 0L
+    private val _modelRevision = MutableStateFlow(0L)
+    val modelRevision: StateFlow<Long> = _modelRevision.asStateFlow()
+    private val currentModelSelections = java.util.concurrent.ConcurrentHashMap<String, ModelSelection>()
+    private val _skillsRevision = MutableStateFlow(0L)
+    val skillsRevision: StateFlow<Long> = _skillsRevision.asStateFlow()
     private val _capabilities = MutableStateFlow<WelcomeCapabilities?>(null)
     val capabilities: StateFlow<WelcomeCapabilities?> = _capabilities.asStateFlow()
 
@@ -142,6 +161,18 @@ class BridgeRepository(
 
     private val _openSession = MutableStateFlow<OpenSession?>(null)
     val openSession: StateFlow<OpenSession?> = _openSession.asStateFlow()
+
+    /** Live assistant output of the open session (`assistantStream`); never persisted. */
+    private val streams = TransientStreams()
+    private val _transientStreams = MutableStateFlow<List<TransientStream>>(emptyList())
+    val transientStreams: StateFlow<List<TransientStream>> = _transientStreams.asStateFlow()
+
+    /** Plugin self-update of the connected computer (`pluginUpdate`). */
+    val pluginUpdate = PluginUpdater(client, scope)
+
+    /** Bumped on `s2c.schedule.changed`, so open host-level task lists reload. */
+    private val _scheduleRevision = MutableStateFlow(0L)
+    val scheduleRevision: StateFlow<Long> = _scheduleRevision.asStateFlow()
 
     private val _schedules = MutableStateFlow<ScheduleState?>(null)
     /** Automation tasks of the session whose task list was last requested. */
@@ -173,7 +204,23 @@ class BridgeRepository(
         // reconnect with an identical welcome is conflated away there, and the new
         // socket then never re-opened the conversation on screen.
         scope.launch { client.frames.collect { handle(it) } }
+        // Catalogs and model selections belong to one connection; resync itself happens on welcome.
+        scope.launch {
+            client.state.collect { state ->
+                invalidateConnectionScopedState()
+                // Unfinished live output dies with the connection (no replay for deltas).
+                if (state !is ConnectionState.Authenticated) clearStreams()
+                pluginUpdate.updateConnection(_host.value?.profileId, (state as? ConnectionState.Authenticated)?.welcome)
+            }
+        }
         _host.value?.let { client.start(it) }
+    }
+
+    private fun invalidateConnectionScopedState() {
+        catalogGeneration++
+        currentModelSelections.clear()
+        _modelRevision.update { it + 1 }
+        _skillsRevision.update { it + 1 }
     }
 
     // ---------- hosts ----------
@@ -255,6 +302,7 @@ class BridgeRepository(
         keys.delete(profileId)
         store.clearCursor(profileId)
         outbox.clear(profileId)
+        catalogCache.remove(profileId)
         drafts.remove(profileId)
         scope.launch {
             cache.remove(profileId)
@@ -279,6 +327,7 @@ class BridgeRepository(
         _questions.value = emptyList()
         _openSession.value = null
         _schedules.value = null
+        currentModelSelections.clear()
         notifier.cancelAll()
         commitRoster(next)
         val credentials = next.active?.credentials()
@@ -359,6 +408,7 @@ class BridgeRepository(
         visibility.setViewingSession(sessionId)
         notifier.cancelSession(sessionId)
         if (_openSession.value?.sessionId != sessionId) {
+            clearStreams()
             val running = _sessions.value.firstOrNull { it.id == sessionId }?.status == "running"
             _openSession.value = OpenSession(sessionId, turnRunning = running)
             _host.value?.let { restoreConversation(it.profileId, sessionId) }
@@ -368,7 +418,10 @@ class BridgeRepository(
 
     fun closeSession(sessionId: String) {
         if (visibility.viewingSession.value == sessionId) visibility.setViewingSession(null)
-        if (_openSession.value?.sessionId == sessionId) _openSession.value = null
+        if (_openSession.value?.sessionId == sessionId) {
+            _openSession.value = null
+            clearStreams()
+        }
         scope.launch { client.send(FrameType.SESSION_CLOSE, SessionRef.serializer(), SessionRef(sessionId)) }
     }
 
@@ -486,11 +539,108 @@ class BridgeRepository(
     }
 
     /** The host's model catalog for [sessionId] (§4); never built into the app. */
-    suspend fun loadModels(sessionId: String): SessionModels {
+    private suspend fun commandFrame(type: String, payload: kotlinx.serialization.json.JsonElement, timeout: Long = 12_000, progress: ((Envelope) -> Unit)? = null): Envelope {
+        requireAuthenticated()
+        if (_capabilities.value?.commands != true) throw UnsupportedFeatureException()
+        val expected = connection.value
+        val expectedHost = _host.value
+        val reply = client.request(type, payload, timeout, progress)
+        if (connection.value !== expected || _host.value != expectedHost) throw kotlinx.coroutines.CancellationException("指令所属连接已变化")
+        return reply
+    }
+    private fun catalogKey(sessionId: String, kind: String): dev.hailab.deeppilot.core.catalog.CatalogCache.Key {
+        val host = _host.value ?: throw NotConnectedException()
+        val binding = dev.hailab.deeppilot.core.catalog.CatalogCache.digest(listOf(host.host, host.audience, host.deviceId, host.tlsFingerprint.orEmpty()))
+        return dev.hailab.deeppilot.core.catalog.CatalogCache.Key(host.profileId, binding, sessionId, kind)
+    }
+    suspend fun loadCommands(sessionId: String, force: Boolean = false, cached: ((CommandCatalog, Boolean) -> Unit)? = null): CommandCatalog {
+        requireAuthenticated()
+        if (_capabilities.value?.commands != true) throw UnsupportedFeatureException()
+        val expected = connection.value; val host = _host.value
+        val catalog = catalogCache.load(catalogKey(sessionId, "commands"), catalogGeneration.toString(), CommandCatalog.serializer(), force,
+            onCached = { value, stale -> if (connection.value === expected && _host.value == host) cached?.invoke(value, stale) }) {
+            val reply = commandFrame("c2s.session.commands", BridgeJson.encodeToJsonElement(SessionRef.serializer(), SessionRef(sessionId)))
+            reply.decode(CommandCatalog.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+        }
+        if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("目录所属连接已变化")
+        return catalog
+    }
+    suspend fun executeCommand(sessionId: String, line: String, attachments: List<PromptAttachment>, expectedDefinitionId: String? = null): CommandExecution {
+        val parts = attachments.map { item -> CommandAttachment(
+            if (item.kind == PromptAttachment.Kind.Image) "image" else "document", item.name,
+            if (item.kind == PromptAttachment.Kind.Image) item.mediaType else "text/plain",
+            if (item.kind == PromptAttachment.Kind.Image) item.payload else Base64.getEncoder().encodeToString(item.payload.toByteArray(Charsets.UTF_8)),
+        ) }
+        return commandFrame("c2s.session.command", BridgeJson.encodeToJsonElement(CommandRequest.serializer(), CommandRequest(sessionId, line, parts, expectedDefinitionId)), 600_000)
+            .decode(CommandExecution.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+    }
+    suspend fun loadPermissions(sessionId: String): PermissionCatalog =
+        commandFrame("c2s.session.permissions", BridgeJson.encodeToJsonElement(SessionRef.serializer(), SessionRef(sessionId)))
+            .decode(PermissionCatalog.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+    suspend fun recordFeedback(sessionId: String, text: String, category: String) {
+        commandFrame("c2s.session.feedback", BridgeJson.encodeToJsonElement(FeedbackRequest.serializer(), FeedbackRequest(sessionId, text, category)))
+    }
+    /** Whether the bridge can export the conversation text as Markdown (`sessionMarkdown`). */
+    val supportsMarkdownExport: Boolean get() = _capabilities.value?.sessionMarkdown == true
+
+    /**
+     * Streams a session export into [output]: the full ZIP log, or the conversation
+     * text as Markdown. Binary chunks when the bridge offers them; partial files are deleted.
+     */
+    suspend fun exportSession(sessionId: String, output: File, format: SessionExportFormat = SessionExportFormat.Zip): File {
+        // Older bridges ignore an unknown format and send a ZIP, so never ask them for Markdown.
+        if (format == SessionExportFormat.Markdown && !supportsMarkdownExport) throw UnsupportedFeatureException()
+        val binary = _capabilities.value?.binaryFrames == true
+        try {
+            output.outputStream().use { stream ->
+                val writer = ExportChunkWriter(stream, binary)
+                val request = ExportRequest(
+                    sessionId,
+                    format = format.wire.takeIf { format != SessionExportFormat.Zip },
+                    binary = true.takeIf { binary },
+                )
+                val reply = try {
+                    commandFrame(FrameType.SESSION_EXPORT, BridgeJson.encodeToJsonElement(ExportRequest.serializer(), request), 600_000) { writer.append(it) }
+                } catch (_: MalformedTransferException) {
+                    throw InvalidResponseException()
+                }
+                val done = reply.decode(ExportDone.serializer()) ?: throw InvalidResponseException()
+                if (done.sessionId != sessionId || done.chunks != writer.chunks || done.bytes != writer.bytes || !format.accepts(done.mediaType)) {
+                    throw InvalidResponseException()
+                }
+            }
+            return output
+        } catch (error: Throwable) { output.delete(); throw error }
+    }
+
+    suspend fun loadSkills(sessionId: String, force: Boolean = false, cached: ((List<SkillSummary>, Boolean) -> Unit)? = null): List<SkillSummary> {
+        requireAuthenticated()
+        if (_capabilities.value?.skills != true) throw UnsupportedFeatureException()
+        val expected = connection.value; val host = _host.value
+        val catalog = catalogCache.load(catalogKey(sessionId, "skills"), catalogGeneration.toString(), kotlinx.serialization.builtins.ListSerializer(SkillSummary.serializer()), force,
+            onCached = { value, stale -> if (connection.value === expected && _host.value == host) cached?.invoke(value, stale) }) {
+            val reply = client.request(FrameType.SESSION_SKILLS, SessionSkillsRequest.serializer(), SessionSkillsRequest(sessionId))
+            if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("目录所属连接已变化")
+            reply.decode(SessionSkills.serializer())?.takeIf { it.sessionId == sessionId }?.skills ?: throw InvalidResponseException()
+        }
+        if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("目录所属连接已变化")
+        return catalog
+    }
+
+    suspend fun loadModels(sessionId: String, force: Boolean = false, cached: ((SessionModels, Boolean) -> Unit)? = null): SessionModels {
         requireAuthenticated()
         if (_capabilities.value?.models != true) throw UnsupportedFeatureException()
-        val reply = client.request(FrameType.SESSION_MODELS, SessionModelsRequest.serializer(), SessionModelsRequest(sessionId))
-        return reply.decode(SessionModels.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+        val expected = connection.value; val host = _host.value
+        val value = catalogCache.load(catalogKey(sessionId, "models"), catalogGeneration.toString(), SessionModels.serializer(), force,
+            onCached = { value, stale -> if (connection.value === expected && _host.value == host) cached?.invoke(value.copy(current = currentModelSelections[sessionId] ?: value.current), stale) },
+            diskValue = { it.copy(current = ModelSelection("", ""), failures = emptyList()) }) {
+            val reply = client.request(FrameType.SESSION_MODELS, SessionModelsRequest.serializer(), SessionModelsRequest(sessionId))
+            if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("模型目录所属连接已变化")
+            reply.decode(SessionModels.serializer())?.takeIf { it.sessionId == sessionId } ?: throw InvalidResponseException()
+        }
+        if (connection.value !== expected || _host.value != host) throw kotlinx.coroutines.CancellationException("模型目录所属连接已变化")
+        currentModelSelections[sessionId] = value.current
+        return value
     }
 
     /** Switches the session's route; returns what the host applied. */
@@ -502,8 +652,10 @@ class BridgeRepository(
             SelectModelRequest.serializer(),
             SelectModelRequest(sessionId, selection.provider, selection.model, selection.reasoningEffort?.takeIf { it.isNotEmpty() }),
         )
-        return reply.decode(SessionModelSelected.serializer())?.takeIf { it.sessionId == sessionId }?.selected
-            ?: throw InvalidResponseException()
+        val selected = reply.decode(SessionModelSelected.serializer())?.takeIf { it.sessionId == sessionId }?.selected ?: throw InvalidResponseException()
+        currentModelSelections[sessionId] = selected
+        catalogCache.invalidate(_host.value?.profileId, sessionId, setOf("models"))
+        return selected
     }
 
     /** One persisted conversation image, from the cache or read back from the host (§5). */
@@ -511,13 +663,26 @@ class BridgeRepository(
         val profileId = _host.value?.profileId ?: return null
         return images.image(profileId, sessionId, attachmentId) {
             if (connection.value !is ConnectionState.Authenticated) return@image null
+            if (_capabilities.value?.binaryFrames == true) {
+                // Raw 256 KiB chunks, no base64 and no single-frame ceiling (§1.1).
+                val assembler = AttachmentChunkAssembler()
+                val ack = client.request(
+                    FrameType.SESSION_ATTACHMENT,
+                    BridgeJson.encodeToJsonElement(AttachmentRequest.serializer(), AttachmentRequest(sessionId, attachmentId, binary = true)),
+                    timeoutMillis = 60_000,
+                    onProgress = { assembler.append(it) },
+                )
+                return@image assembler.finish(ack)
+            }
+            // maxFrameBytes lifts the bridge's 1 MiB default; it still caps text frames at 2 MiB (E_TOO_LARGE).
             val reply = client.request(
                 FrameType.SESSION_ATTACHMENT,
                 AttachmentRequest.serializer(),
-                AttachmentRequest(sessionId, attachmentId),
+                AttachmentRequest(sessionId, attachmentId, maxFrameBytes = BridgeClient.MAX_INBOUND_FRAME_BYTES),
                 timeoutMillis = 30_000,
             )
-            reply.decode(AttachmentData.serializer())?.data?.takeIf { it.isNotEmpty() }
+            val base64 = reply.decode(AttachmentData.serializer())?.data?.takeIf { it.isNotEmpty() && it.length <= MAX_ATTACHMENT_BASE64 }
+            base64?.let { runCatching { Base64.getMimeDecoder().decode(it) }.getOrNull() }
         }
     }
 
@@ -547,6 +712,7 @@ class BridgeRepository(
     suspend fun cancelTurn(sessionId: String) {
         requireAuthenticated()
         client.request(FrameType.SESSION_CANCEL, SessionRef.serializer(), SessionRef(sessionId))
+        if (_openSession.value?.sessionId == sessionId) finishStreams(null)
     }
 
     suspend fun respondApproval(requestId: String, allow: Boolean) {
@@ -703,6 +869,68 @@ class BridgeRepository(
         }
     }
 
+    // ---------- host-level schedules (schedulesHost) ----------
+
+    /** Which schedule frames this host takes; host-level ones win when both are offered. */
+    val scheduleMode: ScheduleMode
+        get() = ScheduleMode.resolve(_capabilities.value?.schedules == true, _capabilities.value?.schedulesHost == true)
+
+    suspend fun hostSchedules(active: Boolean?, offset: Int, limit: Int = dev.hailab.deeppilot.core.schedule.HostScheduleList.PAGE_SIZE): HostScheduleSnapshot =
+        hostScheduleRequest(FrameType.SCHEDULE_HOST_LIST, HostScheduleListRequest.serializer(), HostScheduleListRequest(active, limit, offset))
+            .decode(HostScheduleSnapshot.serializer()) ?: throw InvalidResponseException()
+
+    suspend fun hostSchedule(id: String): HostScheduleTask =
+        hostScheduleRequest(FrameType.SCHEDULE_HOST_VIEW, HostScheduleViewRequest.serializer(), HostScheduleViewRequest(id))
+            .decode(HostScheduleTaskPayload.serializer())?.task?.takeIf { it.id == id } ?: throw InvalidResponseException()
+
+    suspend fun createHostSchedule(title: String, prompt: String, timing: HostScheduleTiming, target: HostScheduleTarget?): HostScheduleTask {
+        val body = HostScheduleCreate(ClientRequestId.make(), title, prompt, timing, target)
+        return hostScheduleUpdated(FrameType.SCHEDULE_HOST_CREATE, HostScheduleCreate.serializer(), body, body.clientRequestId).task
+            ?: throw InvalidResponseException()
+    }
+
+    /** Edits [task]; the host refuses with E_BUSY when someone changed it since it was read. */
+    suspend fun editHostSchedule(task: HostScheduleTask, patch: HostSchedulePatch): HostScheduleTask {
+        if (patch.isEmpty) return task
+        val body = HostScheduleEdit(ClientRequestId.make(), task.id, task.updatedAt, "update", patch)
+        return hostScheduleUpdated(FrameType.SCHEDULE_HOST_EDIT, HostScheduleEdit.serializer(), body, body.clientRequestId).task
+            ?: throw InvalidResponseException()
+    }
+
+    suspend fun deleteHostSchedule(task: HostScheduleTask) {
+        val body = HostScheduleEdit(ClientRequestId.make(), task.id, task.updatedAt, "delete")
+        val done = hostScheduleUpdated(FrameType.SCHEDULE_HOST_EDIT, HostScheduleEdit.serializer(), body, body.clientRequestId)
+        if (!done.deleted) throw InvalidResponseException()
+    }
+
+    /** Delivers [task] once now. Never retried: the result may be unknown. */
+    suspend fun runHostSchedule(task: HostScheduleTask): HostScheduleTask {
+        val body = HostScheduleRun(ClientRequestId.make(), task.id)
+        return hostScheduleUpdated(FrameType.SCHEDULE_HOST_RUN, HostScheduleRun.serializer(), body, body.clientRequestId).task ?: task
+    }
+
+    /** Minimum interval between deliveries that create a session; display only. */
+    suspend fun hostScheduleLimits(): HostScheduleLimits =
+        hostScheduleRequest(FrameType.SCHEDULE_HOST_LIMITS, JsonObject(emptyMap()))
+            .decode(HostScheduleLimits.serializer()) ?: throw InvalidResponseException()
+
+    suspend fun hostScheduleHistory(taskId: String, before: String? = null): ScheduleHistory =
+        hostScheduleRequest(FrameType.SCHEDULE_HISTORY, HostScheduleHistoryRequest.serializer(), HostScheduleHistoryRequest(taskId, before = before))
+            .decode(ScheduleHistoryPayload.serializer())?.history?.takeIf { it.id == taskId } ?: throw InvalidResponseException()
+
+    private suspend fun <T> hostScheduleRequest(type: String, serializer: kotlinx.serialization.KSerializer<T>, payload: T): Envelope =
+        hostScheduleRequest(type, BridgeJson.encodeToJsonElement(serializer, payload))
+
+    private suspend fun hostScheduleRequest(type: String, payload: kotlinx.serialization.json.JsonElement): Envelope {
+        requireAuthenticated()
+        if (_capabilities.value?.schedulesHost != true) throw UnsupportedFeatureException()
+        return client.request(type, payload)
+    }
+
+    private suspend fun <T> hostScheduleUpdated(type: String, serializer: kotlinx.serialization.KSerializer<T>, payload: T, requestId: String): HostScheduleUpdated =
+        hostScheduleRequest(type, serializer, payload).decode(HostScheduleUpdated.serializer())
+            ?.takeIf { it.clientRequestId == requestId } ?: throw InvalidResponseException()
+
     private fun requireSchedules() {
         requireAuthenticated()
         if (_capabilities.value?.schedules != true) throw UnsupportedFeatureException()
@@ -717,12 +945,21 @@ class BridgeRepository(
     private fun handle(envelope: Envelope) {
         when (envelope.type) {
             FrameType.WELCOME -> {
+                invalidateConnectionScopedState()
                 _capabilities.value = envelope.decode(Welcome.serializer())?.capabilities
                 refresh()
                 reconcileDeliveries()
             }
             FrameType.RESYNC -> refresh()
-            FrameType.SCHEDULE_CHANGED -> _schedules.value?.let { loadSchedules(it.sessionId) }
+            FrameType.SCHEDULE_CHANGED -> {
+                _schedules.value?.let { loadSchedules(it.sessionId) }
+                _scheduleRevision.update { it + 1 }
+            }
+            FrameType.SESSION_DELTA -> envelope.decode(SessionDelta.serializer())?.let { delta ->
+                if (_capabilities.value?.assistantStream != true || _openSession.value?.sessionId != delta.sessionId) return@let
+                synchronized(streams) { if (streams.receive(delta)) _transientStreams.value = streams.streams }
+            }
+            FrameType.PLUGIN_UPDATE_PROGRESS -> envelope.decode(PluginUpdateProgress.serializer())?.let { pluginUpdate.receive(it) }
             FrameType.SESSION_RENAMED -> envelope.decode(SessionRenamed.serializer())?.let { renamed ->
                 val id = renamed.sessionId ?: return@let
                 val title = renamed.title ?: return@let
@@ -732,6 +969,16 @@ class BridgeRepository(
             FrameType.SESSION_ARCHIVED -> envelope.decode(SessionRef.serializer())?.let { archived ->
                 _sessions.update { list -> list.filterNot { it.id == archived.sessionId } }
                 persistSessions()
+            }
+            FrameType.SKILLS_CHANGED, FrameType.COMMANDS_CHANGED -> {
+                val sessionId = envelope.decode(SkillsChanged.serializer())?.sessionId
+                catalogCache.invalidate(_host.value?.profileId, sessionId, setOf("skills", "commands"))
+                _skillsRevision.update { it + 1 }
+            }
+            FrameType.MODELS_CHANGED -> envelope.decode(ModelsChanged.serializer())?.let { change ->
+                change.current?.let { currentModelSelections[change.sessionId] = it } ?: currentModelSelections.remove(change.sessionId)
+                catalogCache.invalidate(_host.value?.profileId, change.sessionId, setOf("models"))
+                _modelRevision.update { it + 1 }
             }
             FrameType.SESSIONS_SNAPSHOT -> envelope.decode(SessionsSnapshot.serializer())?.let { snapshot ->
                 _sessions.update { current ->
@@ -769,6 +1016,7 @@ class BridgeRepository(
                 persistConversation(page.sessionId)
             }
             FrameType.SESSION_EVENT -> envelope.decode(SessionEvent.serializer())?.let { event ->
+                if (_openSession.value?.sessionId == event.sessionId) retireStreams(event)
                 _openSession.update { open ->
                     if (open == null || open.sessionId != event.sessionId) open
                     else SessionReducer.reduce(open, event).state
@@ -800,6 +1048,27 @@ class BridgeRepository(
             FrameType.PENDING_CLEARED -> envelope.decode(PendingCleared.serializer())?.let { clearPending(it.requestId) }
             FrameType.NOTIFY -> envelope.decode(Notify.serializer())?.let { show(it) }
         }
+    }
+
+    /** The formal answer replaces its live stream; the end of a turn drops any that are left. */
+    private fun retireStreams(event: SessionEvent) {
+        when (event.kind) {
+            "turn.end" -> finishStreams(null)
+            "message.final" -> {
+                val data = event.data as? JsonObject ?: return
+                if ((data["role"] as? JsonPrimitive)?.content != "assistant") return
+                finishStreams((data["streamId"] as? JsonPrimitive)?.content?.takeIf { it.isNotEmpty() })
+            }
+        }
+    }
+
+    private fun finishStreams(streamId: String?) = synchronized(streams) {
+        if (streams.finish(streamId)) _transientStreams.value = streams.streams
+    }
+
+    private fun clearStreams() = synchronized(streams) {
+        streams.clear()
+        _transientStreams.value = emptyList()
     }
 
     private fun clearPending(requestId: String) {
@@ -841,6 +1110,7 @@ class BridgeRepository(
             WireErrorCode.E_UNSUPPORTED,
         )
         const val TAIL_COUNT = 60
+        const val MAX_ATTACHMENT_BASE64 = 16 * 1024 * 1024
         const val CACHE_WRITE_DELAY_MILLIS = 800L
     }
 }

@@ -1,5 +1,12 @@
 package dev.hailab.deeppilot.ui.screens
 
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import dev.hailab.deeppilot.core.protocol.SkillSummary
+import dev.hailab.deeppilot.core.skills.SkillQuery
+import dev.hailab.deeppilot.core.protocol.HostCommand
+import dev.hailab.deeppilot.core.protocol.CommandCatalog
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -109,14 +116,63 @@ fun PromptComposer(
     onOpenTodos: () -> Unit,
     focusRequester: FocusRequester,
     modifier: Modifier = Modifier,
+    supportsSkills: Boolean = false,
+    skillCatalogScope: String = "",
+    onLoadSkills: suspend () -> List<SkillSummary> = { emptyList() },
+    onLoadCommands: (suspend () -> CommandCatalog)? = null,
+    onSelectCommand: (HostCommand) -> Unit = {},
+    onPickSkill: (String?) -> Unit = {},
+    onReadSkills: (suspend (Boolean, (List<SkillSummary>, Boolean) -> Unit) -> List<SkillSummary>)? = null,
+    onReadCommands: (suspend (Boolean, (CommandCatalog, Boolean) -> Unit) -> CommandCatalog)? = null,
 ) {
     val p = palette
+    var fieldValue by remember { mutableStateOf(TextFieldValue(draft, TextRange(draft.length))) }
+    var dismissed by remember(skillCatalogScope) { mutableStateOf<SkillQuery?>(null) }
+    // 外部发送或恢复草稿时同步文本；普通选区与组合输入由编辑器独立持有。
+    SideEffect {
+        if (fieldValue.text != draft) fieldValue = TextFieldValue(draft, TextRange(draft.length))
+    }
     var focused by remember { mutableStateOf(false) }
     val expanded = focused || draft.isNotEmpty() || attachments.isNotEmpty()
     val shape = RoundedCornerShape(AppRadius.large)
     val working = sending || running || stopping
 
+    val skillQuery = if (focused && (supportsSkills || onLoadCommands != null) && fieldValue.text == draft) {
+        SkillQuery.detect(draft, fieldValue.selection.start, fieldValue.selection.end, fieldValue.composition != null)?.takeUnless { it == dismissed }
+    } else null
+
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SkillSuggestions(
+            query = skillQuery,
+            catalogScope = skillCatalogScope,
+            load = onLoadSkills,
+            loadCommands = onLoadCommands,
+            read = onReadSkills,
+            readCommands = onReadCommands,
+            onPickCommand = { command ->
+                onPickSkill(null)
+                val query = skillQuery
+                if (query != null && command.action in listOf("model", "file", "permission", "feedback")) {
+                    val remaining = draft.removeRange(query.start, query.end).removePrefix(" ")
+                    fieldValue = TextFieldValue(remaining, TextRange(0))
+                    onDraftChange(remaining)
+                    onSelectCommand(command)
+                } else query?.complete(command.name, draft)?.let { edit ->
+                    fieldValue = TextFieldValue(edit.text, TextRange(edit.caret))
+                    onDraftChange(edit.text)
+                    focusRequester.requestFocus()
+                }
+            },
+            onDismiss = { dismissed = skillQuery },
+            onPick = { skill ->
+                skillQuery?.complete(skill.name, draft)?.let { edit ->
+                    fieldValue = TextFieldValue(edit.text, TextRange(edit.caret))
+                    onDraftChange(edit.text)
+                    onPickSkill(skill.name)
+                    focusRequester.requestFocus()
+                }
+            },
+        )
         if (attachments.isNotEmpty()) AttachmentChips(attachments, onRemoveAttachment)
 
         Column(
@@ -149,8 +205,11 @@ fun PromptComposer(
                 val attach = @Composable { AttachButton(onAddAttachment) }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     BasicTextField(
-                        value = draft,
-                        onValueChange = onDraftChange,
+                        value = fieldValue,
+                        onValueChange = { value ->
+                            fieldValue = value
+                            if (draft != value.text) onDraftChange(value.text)
+                        },
                         textStyle = AppType.body.copy(color = p.foreground),
                         cursorBrush = SolidColor(p.accent),
                         maxLines = 8,
@@ -212,7 +271,7 @@ private fun AttachButton(onClick: () -> Unit) {
 @Composable
 private fun ModelButton(models: SessionModels?, loading: Boolean, error: String?, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val p = palette
-    val title = models?.displayName() ?: stringResource(R.string.model_fallback_title)
+    val title = models?.displayName()?.takeIf { it.isNotBlank() } ?: stringResource(R.string.model_fallback_title)
     val color = if (error != null && models == null) p.danger else p.foreground
     val label = stringResource(R.string.model_current_a11y, title)
     Row(

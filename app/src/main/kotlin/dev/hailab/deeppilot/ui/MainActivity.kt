@@ -74,7 +74,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
-        if (graph.store.loadHost() != null) onPaired()
+        val paired = graph.store.loadHost() != null
+        // Before anything depends on the tour state: an existing user is marked done here, a new
+        // one is armed, so the permission gate in onPaired() and the overlay in AppRoot have a basis.
+        graph.onboarding.reconcile(paired = paired)
+        if (paired) onPaired()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -91,9 +95,17 @@ class MainActivity : ComponentActivity() {
         intent.getStringExtra(EXTRA_SESSION_ID)?.let { sessionToOpen.value = it }
     }
 
-    /** Once a host exists: ask for notifications and start "keep connected". */
+    /**
+     * Once a host exists: ask for notifications and start "keep connected".
+     *
+     * A user who is about to see the onboarding is not asked here: the tour's last page asks
+     * instead, so the system dialog does not appear before the user knows what it is for.
+     * Keep connected still starts, so the connection is not affected.
+     */
     private fun onPaired() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        graph.onboarding.reconcile(paired = true)
+        if (!graph.onboarding.needsOnboarding(paired = true) &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)

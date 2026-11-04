@@ -1,5 +1,6 @@
 package dev.hailab.deeppilot.core.pairing
 
+import dev.hailab.deeppilot.core.bridge.AttemptId
 import dev.hailab.deeppilot.core.protocol.BridgeJson
 import dev.hailab.deeppilot.core.protocol.PairRequest
 import dev.hailab.deeppilot.core.protocol.PairResponse
@@ -43,6 +44,8 @@ class PairingClient(private val base: OkHttpClient) {
         publicKeyX963: String,
         deviceName: String,
         appVersion: String,
+        /** Diagnostic id sent as `X-DeepPilot-Attempt` (§2.0). */
+        attemptId: String? = AttemptId.make(),
     ): PairedHost = withContext(Dispatchers.IO) {
         val endpoints = HostEndpoints.of(link.host) ?: throw PairingException(PairingError.INVALID_HOST)
         val (client, trust) = BridgeTls.client(base, link.tlsFingerprint)
@@ -50,7 +53,7 @@ class PairingClient(private val base: OkHttpClient) {
             PairRequest.serializer(),
             PairRequest(code = link.code, publicKey = publicKeyX963, deviceName = deviceName, appVersion = appVersion),
         ).toRequestBody("application/json".toMediaType())
-        val request = Request.Builder().url(endpoints.pair).post(body).build()
+        val request = AttemptId.apply(Request.Builder().url(endpoints.pair).post(body), attemptId).build()
         val (status, text) = try {
             client.newCall(request).execute().use { it.code to it.body?.string().orEmpty() }
         } catch (e: IOException) {

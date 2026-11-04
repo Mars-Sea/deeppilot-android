@@ -1,6 +1,13 @@
 package dev.hailab.deeppilot.ui.screens
 
 import android.Manifest
+import android.content.Intent
+import androidx.core.content.FileProvider
+import java.io.File
+import java.util.UUID
+import dev.hailab.deeppilot.core.protocol.HostCommand
+import dev.hailab.deeppilot.core.protocol.CommandCatalog
+import dev.hailab.deeppilot.core.protocol.SessionCommandLine
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -42,6 +49,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -82,6 +90,8 @@ import dev.hailab.deeppilot.core.protocol.PendingApproval
 import dev.hailab.deeppilot.core.protocol.PendingQuestion
 import dev.hailab.deeppilot.core.protocol.SessionModels
 import dev.hailab.deeppilot.core.session.Timeline
+import dev.hailab.deeppilot.core.protocol.SessionExportFormat
+import dev.hailab.deeppilot.core.schedule.ScheduleMode
 import dev.hailab.deeppilot.ui.AppRadius
 import dev.hailab.deeppilot.ui.AppType
 import dev.hailab.deeppilot.ui.attempt
@@ -118,6 +128,9 @@ fun SessionScreen(
 
     val state = open?.takeIf { it.sessionId == sessionId }
     val rows = remember(state?.messages) { Timeline.group(state?.messages.orEmpty()) }
+    // Live output (assistantStream): its own rows after the formal timeline, replaced by message.final.
+    val liveStreams by repository.transientStreams.collectAsStateWithLifecycle()
+    val liveRows = remember(liveStreams) { liveStreams.map { stream -> stream.id to Timeline.group(stream.presentations) } }
     val summary = sessions.firstOrNull { it.id == sessionId }
     val title = summary?.title?.ifBlank { null } ?: stringResource(R.string.conversation_untitled)
     val connected = connection is ConnectionState.Authenticated
@@ -145,10 +158,13 @@ fun SessionScreen(
         }
     }
     val capabilities by repository.capabilities.collectAsStateWithLifecycle()
-    val supportsSchedules = capabilities?.schedules == true
+    val skillsRevision by repository.skillsRevision.collectAsStateWithLifecycle()
+    val scheduleMode = ScheduleMode.resolve(capabilities?.schedules == true, capabilities?.schedulesHost == true)
+    // 旧宿主用会话级数组，宿主级 Host 用过滤到本会话 target 的新帧；任一可用都保留入口。
+    val supportsSchedules = scheduleMode != ScheduleMode.Unavailable
     val supportsFork = capabilities?.sessionFork == true
-    LaunchedEffect(sessionId, connected, supportsSchedules) {
-        if (connected && supportsSchedules) repository.loadSchedules(sessionId)
+    LaunchedEffect(sessionId, connected, scheduleMode) {
+        if (connected && scheduleMode == ScheduleMode.Legacy) repository.loadSchedules(sessionId)
     }
 
     // Pending approval/question half sheet, with a chip to bring back a dismissed one.
@@ -182,7 +198,8 @@ fun SessionScreen(
     var layoutTick by remember { mutableIntStateOf(0) }
     val tail = state?.messages?.lastOrNull()
     val tailKey = tail?.let { it.seq to (it.text?.length ?: 0) + (it.thinking?.length ?: 0) }
-    LaunchedEffect(tailKey, pendingText, layoutTick, rows.size) {
+    val liveLength = liveStreams.sumOf { it.text.length + it.thinking.length }
+    LaunchedEffect(tailKey, pendingText, layoutTick, rows.size, liveLength) {
         if (stickToBottom && listState.layoutInfo.totalItemsCount > 0) {
             listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
             listState.scrollBy(1_000_000f)
@@ -255,29 +272,56 @@ fun SessionScreen(
 
     // Model catalog for this session (§4), loaded once connected and supported.
     var models by remember(sessionId) { mutableStateOf<SessionModels?>(null) }
+    var modelsStale by remember(sessionId) { mutableStateOf(false) }
+    val modelRevision by repository.modelRevision.collectAsState()
+    var modelJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var modelLoadToken by remember { mutableIntStateOf(0) }
     var modelsLoading by remember { mutableStateOf(false) }
     var modelsError by remember { mutableStateOf<String?>(null) }
     var showsModelSheet by remember { mutableStateOf(false) }
+    var showsPermissionSheet by remember { mutableStateOf(false) }
+    var showsFeedbackSheet by remember { mutableStateOf(false) }
+    var showsExportSheet by remember { mutableStateOf(false) }
+    /** Exports into the app cache and hands the file to the system share sheet. */
+    suspend fun exportAndShare(format: SessionExportFormat) {
+        val directory = File(context.cacheDir, "command-exports").apply { mkdirs() }
+        directory.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 86_400_000 }?.forEach { it.delete() }
+        val output = repository.exportSession(sessionId, File(directory, "dsh-session-" + UUID.randomUUID() + "." + format.fileExtension), format)
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".files", output)
+        val type = if (format == SessionExportFormat.Markdown) "text/markdown" else "application/zip"
+        val intent = Intent(Intent.ACTION_SEND).setType(type).putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(Intent.createChooser(intent, context.getString(R.string.composer_commands_export_title)))
+    }
+    var commandSending by remember(sessionId) { mutableStateOf(false) }
+    var chosenSkillName by remember(sessionId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(skillsRevision) {
+        showsPermissionSheet = false
+        showsFeedbackSheet = false
+        // 用户已明确选择的技能随草稿保留，目录刷新不能把它变成同名系统指令。
+    }
+
     var changingEffort by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    fun loadModels() {
+    fun loadModels(force: Boolean = false) {
         if (modelsLoading) return
         if (capabilities?.models != true) {
             modelsError = context.getString(R.string.model_switch_unavailable)
             return
         }
         modelsLoading = true
-        scope.launch {
-            var loaded: SessionModels? = null
-            val error = attempt { loaded = repository.loadModels(sessionId) }
-            if (error == null) {
-                models = loaded
-                modelsError = null
-            } else {
-                modelsError = context.errorMessage(error)
-            }
-            modelsLoading = false
+        val token = ++modelLoadToken
+        modelJob = scope.launch {
+            try {
+                var loaded: SessionModels? = null
+                val error = attempt { loaded = repository.loadModels(sessionId, force) { value, stale ->
+                    if (modelLoadToken == token) { models = value; modelsStale = stale }
+                } }
+                if (modelLoadToken != token) return@launch
+                if (error == null) { models = loaded; modelsStale = false; modelsError = null }
+                else modelsError = context.errorMessage(error)
+            } finally { if (modelLoadToken == token) modelsLoading = false }
         }
     }
     suspend fun selectModel(selection: ModelSelection) {
@@ -285,14 +329,103 @@ fun SessionScreen(
         models = models?.copy(current = selected)
         modelsError = null
     }
-    LaunchedEffect(sessionId, connected, capabilities?.models) {
+    LaunchedEffect(sessionId, connected, capabilities?.models, modelRevision) {
+        modelJob?.cancel()
+        modelsLoading = false
         if (connected && capabilities?.models == true) loadModels()
+    }
+
+    fun decorateCommands(catalog: CommandCatalog): CommandCatalog {
+        check(catalog.commands.none { it.name == "model" || it.name == "file" })
+        val local = listOfNotNull(
+            if (capabilities?.models == true) HostCommand("model", "", "client:model") else null,
+            HostCommand("file", "", "client:file"),
+        )
+        return catalog.copy(commands = catalog.commands + local)
+    }
+    suspend fun commandCatalog(force: Boolean = false, cached: ((CommandCatalog, Boolean) -> Unit)? = null): CommandCatalog =
+        decorateCommands(repository.loadCommands(sessionId, force) { value, stale -> cached?.invoke(decorateCommands(value), stale) })
+    fun presentCommand(command: HostCommand) {
+        when (command.action) {
+            "model" -> { focusManager.clearFocus(); showsModelSheet = true }
+            "file" -> showsAttachmentSheet = true
+            "permission" -> { focusManager.clearFocus(); showsPermissionSheet = true }
+            "feedback" -> { focusManager.clearFocus(); showsFeedbackSheet = true }
+        }
+    }
+    fun openCommand(command: HostCommand) {
+        if (command.action !in listOf("permission", "feedback")) { presentCommand(command); return }
+        val revision = skillsRevision
+        val remaining = draft
+        scope.launch {
+            try {
+                val fresh = commandCatalog(force = true)
+                if (revision != skillsRevision) return@launch
+                check(fresh.commands.any { it.name == command.name && it.definitionId == command.definitionId })
+                presentCommand(command)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (draft == remaining) draft = "/" + command.name + if (remaining.isNotEmpty()) " " + remaining else ""
+                alert = context.getString(R.string.composer_commands_title) to context.getString(R.string.composer_commands_failed)
+            }
+        }
+    }
+    fun sendCommand(text: String, outgoing: List<PromptAttachment>) {
+        if (commandSending) return
+        commandSending = true
+        scope.launch {
+            try {
+                val catalog = commandCatalog(force = true)
+                val name = SessionCommandLine.name(text)
+                val command = catalog.commands.firstOrNull { it.name == name }
+                if (command == null) {
+                    check(capabilities?.skills == true && repository.loadSkills(sessionId).any { it.name == name })
+                    // 已确认是技能才走原投递通道；不确定回执不能恢复成可重发草稿。
+                    if (draft.trim() == text && attachments.toList() == outgoing) { draft = ""; attachments.clear() }
+                    try { repository.sendPrompt(sessionId, text, outgoing) }
+                    catch (error: PromptUnconfirmedException) {
+                        alert = context.getString(R.string.delivery_unconfirmed_title) to context.errorMessage(error)
+                        return@launch
+                    } catch (error: Exception) {
+                        if (draft.isBlank() && attachments.isEmpty()) { draft = text; attachments += outgoing }
+                        throw error
+                    }
+                } else if (command.action in listOf("model", "file", "permission", "feedback") && text == "/" + name) {
+                    if (draft.trim() == text) draft = ""
+                    presentCommand(command)
+                    return@launch
+                } else {
+                    check(command.action !in listOf("model", "file"))
+                    check(outgoing.isEmpty() || command.input?.attachments == true)
+                    val result = repository.executeCommand(sessionId, text, outgoing)
+                    if (result.result.kind != "success") {
+                        alert = context.getString(R.string.composer_commands_title) to commandResultMessage(context, result.result)
+                        return@launch
+                    }
+                    if (command.action == "export") {
+                        // With Markdown on offer the user picks a format first, as on iOS.
+                        if (repository.supportsMarkdownExport) showsExportSheet = true
+                        else exportAndShare(SessionExportFormat.Zip)
+                    } else {
+                        val message = commandResultMessage(context, result.result)
+                        alert = context.getString(R.string.composer_commands_title) to message
+                    }
+                }
+                if (draft.trim() == text && attachments.toList() == outgoing) { draft = ""; attachments.clear() }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { alert = context.getString(R.string.composer_commands_title) to context.getString(R.string.composer_commands_failed) }
+            finally { commandSending = false }
+        }
     }
 
     fun send() {
         val text = draft.trim()
         val outgoing = attachments.toList()
-        if ((text.isEmpty() && outgoing.isEmpty()) || pendingText != null) return
+        if ((text.isEmpty() && outgoing.isEmpty()) || pendingText != null || commandSending) return
+        if (capabilities?.commands == true && SessionCommandLine.name(text)?.let { it != chosenSkillName } == true) {
+            sendCommand(text, outgoing)
+            return
+        }
         pendingText = text
         pendingAttachments = outgoing
         draft = ""
@@ -342,13 +475,18 @@ fun SessionScreen(
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { SmallSpinner() }
                     }
                 }
-                if (rows.isEmpty() && pendingText == null && pendingSends.isEmpty()) {
+                if (rows.isEmpty() && pendingText == null && pendingSends.isEmpty() && liveStreams.isEmpty()) {
                     item(key = "empty") {
                         if (state?.loaded != true) ConversationSkeleton() else EmptyConversation()
                     }
                 }
                 items(rows, key = { it.key }) { row ->
                     TimelineRow(row, sessionId, repository, onFork = if (supportsFork) ::fork else null) { layoutTick++ }
+                }
+                liveRows.forEach { (streamId, streamRows) ->
+                    items(streamRows, key = { "transient-$streamId-${it.key}" }) { row ->
+                        TimelineRow(row, sessionId, repository, onFork = null) { layoutTick++ }
+                    }
                 }
                 // Sends from earlier that the host never confirmed (the in-flight one is below).
                 items(
@@ -433,9 +571,18 @@ fun SessionScreen(
 
         Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding()) {
             PromptComposer(
+                supportsSkills = connected && capabilities?.skills == true,
+                skillCatalogScope = "$sessionId/$skillsRevision/$connected",
+                onLoadSkills = { if (capabilities?.skills == true) repository.loadSkills(sessionId) else emptyList() },
+                onLoadCommands = if (connected && capabilities?.commands == true) ({ commandCatalog() }) else null,
+                onReadSkills = { force, cached -> if (capabilities?.skills == true) repository.loadSkills(sessionId, force, cached) else emptyList() },
+                onReadCommands = if (connected && capabilities?.commands == true) ({ force, cached -> commandCatalog(force, cached) }) else null,
+                onSelectCommand = ::openCommand,
+                onPickSkill = { chosenSkillName = it },
                 draft = draft,
                 onDraftChange = {
                     draft = it
+                    if (SessionCommandLine.name(it) != chosenSkillName) chosenSkillName = null
                     sendError = null
                 },
                 attachments = attachments,
@@ -464,7 +611,7 @@ fun SessionScreen(
                 focusRequester = focusRequester,
                 todoItems = summary?.todoItems.orEmpty(),
                 canSubmit = connected,
-                sending = pendingText != null,
+                sending = pendingText != null || commandSending,
                 running = running,
                 stopping = stopping,
                 onSend = ::send,
@@ -544,12 +691,28 @@ fun SessionScreen(
         )
     }
 
+    if (showsPermissionSheet) {
+        CommandPermissionDialog(load = { repository.loadPermissions(sessionId) }, select = { preset ->
+            val result = repository.executeCommand(sessionId, "/permission " + preset, emptyList(), expectedDefinitionId = "@deepseek-ai/dsh-permission-presets")
+            check(result.result.kind == "success")
+        }, onDismiss = { showsPermissionSheet = false; scope.launch { focusRequester.requestFocus() } })
+    }
+    if (showsExportSheet) {
+        CommandExportDialog(export = { exportAndShare(it) }, onDismiss = { showsExportSheet = false })
+    }
+    if (showsFeedbackSheet) {
+        CommandFeedbackDialog(submit = { text, category -> repository.recordFeedback(sessionId, text, category) },
+            onDismiss = { showsFeedbackSheet = false; scope.launch { focusRequester.requestFocus() } })
+    }
+
     if (showsModelSheet) {
         ModelPickerSheet(
             catalog = models,
             loading = modelsLoading,
             loadError = modelsError,
-            onRefresh = ::loadModels,
+            onRefresh = { loadModels(force = true) },
+            onCheck = { loadModels() },
+            stale = modelsStale,
             onSelect = { selectModel(it) },
             onDismiss = {
                 showsModelSheet = false
@@ -572,7 +735,11 @@ fun SessionScreen(
     }
 
     if (showsSchedules) {
-        ScheduleListSheet(repository = repository, sessionId = sessionId, onDismiss = { showsSchedules = false })
+        if (scheduleMode == ScheduleMode.Host) {
+            HostScheduleSheet(repository = repository, filterSessionId = sessionId, onDismiss = { showsSchedules = false })
+        } else {
+            ScheduleListSheet(repository = repository, sessionId = sessionId, onDismiss = { showsSchedules = false })
+        }
     }
 
     if (showsTodos) {

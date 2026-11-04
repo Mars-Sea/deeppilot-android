@@ -87,6 +87,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -101,6 +102,7 @@ fun SettingsScreen(
     onEditHost: (String) -> Unit,
     onOpenIcons: () -> Unit,
     onOpenArchived: () -> Unit,
+    onReplayOnboarding: () -> Unit,
 ) {
     val p = palette
     val context = LocalContext.current
@@ -110,12 +112,16 @@ fun SettingsScreen(
     val roster by repository.roster.collectAsStateWithLifecycle()
     var pendingDelete by remember { mutableStateOf<HostProfile?>(null) }
     val scope = rememberCoroutineScope()
+    val capabilities by repository.capabilities.collectAsStateWithLifecycle()
+    var showsPluginUpdate by remember { mutableStateOf(false) }
 
     // System settings pages change these behind our back; re-read on return.
     var resumes by remember { mutableIntStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { resumes++ }
     val notificationsOn = remember(resumes) { context.graph.notifier.canPost() }
     val batteryExempt = remember(resumes) { isIgnoringBatteryOptimizations(context) }
+
+    if (showsPluginUpdate) PluginUpdateSheet(repository.pluginUpdate) { showsPluginUpdate = false }
 
     Column(Modifier.fillMaxSize().background(p.background)) {
         NavBar(leading = { BackButton(onBack) }, principal = { NavTitle(stringResource(R.string.settings_title)) })
@@ -161,6 +167,14 @@ fun SettingsScreen(
                         onSetLaunch = { repository.setLaunchHost(profile.id) },
                         onReconnect = { repository.reconnect() },
                         onDelete = { pendingDelete = profile },
+                        // Only the connected host can be updated, and only when its plugin offers it.
+                        onUpdatePlugin = if (profile.id == host?.profileId && connection is ConnectionState.Authenticated &&
+                            capabilities?.pluginUpdate == true
+                        ) {
+                            { showsPluginUpdate = true }
+                        } else {
+                            null
+                        },
                     )
                 }
             }
@@ -245,6 +259,9 @@ fun SettingsScreen(
                 SettingsRow(title = stringResource(R.string.settings_about_privacy)) {
                     Text(stringResource(R.string.settings_about_privacy_value), style = AppType.subheadline, color = p.secondary, maxLines = 1)
                 }
+                SettingsDivider()
+                // The post-pairing tour again; it records nothing and asks for no permission.
+                SettingsRow(title = stringResource(R.string.settings_about_onboarding), onClick = onReplayOnboarding) { Chevron() }
             }
         }
     }
@@ -280,6 +297,7 @@ private fun HostRow(
     onSetLaunch: () -> Unit,
     onReconnect: () -> Unit,
     onDelete: () -> Unit,
+    onUpdatePlugin: (() -> Unit)? = null,
 ) {
     val p = palette
     var menuOpen by remember { mutableStateOf(false) }
@@ -383,6 +401,16 @@ private fun HostRow(
                             onReconnect()
                         },
                     )
+                    if (onUpdatePlugin != null) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.plugin_update_title)) },
+                            leadingIcon = { Icon(Icons.Filled.Download, null) },
+                            onClick = {
+                                menuOpen = false
+                                onUpdatePlugin()
+                            },
+                        )
+                    }
                 }
                 HorizontalDivider()
                 DropdownMenuItem(

@@ -85,7 +85,11 @@ class BridgeClientTest {
     }
 
     /** A minimal bridge: challenge, verify the proof, welcome, answer sessions.list. */
-    private fun bridge(closeWith: Int? = null, challengeDelayMillis: Long = 0) = object : WebSocketListener() {
+    private fun bridge(
+        closeWith: Int? = null,
+        challengeDelayMillis: Long = 0,
+        onRequest: ((WebSocket, Envelope) -> Unit)? = null,
+    ) = object : WebSocketListener() {
         val challenge = AuthChallenge("bm9uY2U", audience, System.currentTimeMillis(), System.currentTimeMillis() + 30_000)
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -130,6 +134,7 @@ class BridgeClientTest {
                         payload = BridgeJson.parseToJsonElement("""{"full":true,"sessions":[{"id":"s1","title":"t","status":"idle","lastActivityTs":1}]}"""),
                     ).encode(),
                 )
+                else -> onRequest?.invoke(webSocket, envelope)
             }
         }
     }
@@ -165,6 +170,105 @@ class BridgeClientTest {
         assertEquals("s1", snapshot.sessions.single().id)
         val prove = received.first { it.type == FrameType.AUTH_PROVE }.decode(AuthProve.serializer())!!
         assertEquals(null, prove.resumeCursor)
+        client.stop()
+    }
+
+    @Test
+    fun exportProgressWaitsForFinalAckAndKeepsRequestCorrelation() = runBlocking {
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(onRequest = { socket, request ->
+            if (request.type == "c2s.session.export") {
+                for (index in 0..1) socket.send(Envelope(type = "s2c.session.export.chunk", id = request.id,
+                    payload = BridgeJson.parseToJsonElement("""{"index":$index,"data":"aGk="}""")).encode())
+                socket.send(Envelope(type = "s2c.ack", id = request.id,
+                    payload = BridgeJson.parseToJsonElement("""{"chunks":2,"bytes":4}""")).encode())
+            }
+        })))
+        val client = client()
+        client.start(credentials())
+        withTimeout(10_000) { client.state.first { it is ConnectionState.Authenticated } }
+        val indexes = CopyOnWriteArrayList<Int>()
+        val reply = client.request("c2s.session.export", onProgress = { frame ->
+            indexes += frame.decode(dev.hailab.deeppilot.core.protocol.ExportChunk.serializer())!!.index
+        })
+        assertEquals(listOf(0, 1), indexes)
+        assertEquals("s2c.ack", reply.type)
+        assertEquals("s1", client.request(FrameType.SESSIONS_LIST).decode(SessionsSnapshot.serializer())!!.sessions.single().id)
+        client.stop()
+    }
+
+    @Test
+    fun malformedExportProgressFailsAndLateAckDoesNotPoisonNextRequest() = runBlocking {
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(onRequest = { socket, request ->
+            if (request.type == "c2s.session.export") {
+                socket.send(Envelope(type = "s2c.session.export.chunk", id = request.id, payload = JsonObject(emptyMap())).encode())
+                socket.send(Envelope(type = "s2c.ack", id = request.id, payload = JsonObject(emptyMap())).encode())
+            }
+        })))
+        val client = client()
+        client.start(credentials())
+        withTimeout(10_000) { client.state.first { it is ConnectionState.Authenticated } }
+        try {
+            client.request("c2s.session.export", onProgress = { throw IllegalArgumentException("invalid archive") })
+            throw AssertionError("invalid archive was accepted")
+        } catch (_: IllegalArgumentException) {}
+        assertEquals("s1", client.request(FrameType.SESSIONS_LIST).decode(SessionsSnapshot.serializer())!!.sessions.single().id)
+        client.stop()
+    }
+
+    /** `[1][u32 BE header length][header JSON][bytes]` (§1.1). */
+    private fun binaryFrame(header: Envelope, body: ByteArray): okio.ByteString {
+        val json = header.encode().toByteArray()
+        val out = java.io.ByteArrayOutputStream()
+        out.write(1)
+        out.write(java.nio.ByteBuffer.allocate(4).putInt(json.size).array())
+        out.write(json)
+        out.write(body)
+        return okio.ByteString.of(*out.toByteArray())
+    }
+
+    @Test
+    fun binaryChunksReachOnlyTheirRequestAndAttemptIdRidesTheUpgrade() = runBlocking {
+        val upgradePaths = CopyOnWriteArrayList<String>()
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(onRequest = { socket, request ->
+            if (request.type == FrameType.SESSION_ATTACHMENT) {
+                // An unsolicited binary frame for another id is dropped.
+                socket.send(binaryFrame(Envelope(type = FrameType.SESSION_ATTACHMENT_CHUNK, id = "other",
+                    payload = BridgeJson.parseToJsonElement("""{"index":0}""")), byteArrayOf(9)))
+                socket.send(binaryFrame(Envelope(type = FrameType.SESSION_ATTACHMENT_CHUNK, id = request.id,
+                    payload = BridgeJson.parseToJsonElement("""{"index":0}""")), byteArrayOf(1, 2, 3)))
+                socket.send(binaryFrame(Envelope(type = FrameType.SESSION_ATTACHMENT_CHUNK, id = request.id,
+                    payload = BridgeJson.parseToJsonElement("""{"index":1}""")), byteArrayOf(4)))
+                socket.send(Envelope(type = FrameType.ACK, id = request.id,
+                    payload = BridgeJson.parseToJsonElement("""{"mediaType":"image/png","chunks":2,"bytes":4}""")).encode())
+            }
+        })))
+        val client = client()
+        client.start(credentials())
+        withTimeout(10_000) { client.state.first { it is ConnectionState.Authenticated } }
+        upgradePaths += server.takeRequest().path!!
+        val assembler = dev.hailab.deeppilot.core.transfer.AttachmentChunkAssembler()
+        val ack = client.request(FrameType.SESSION_ATTACHMENT, onProgress = { assembler.append(it) })
+        assertEquals(listOf<Byte>(1, 2, 3, 4), assembler.finish(ack)!!.toList())
+        val tag = client.attemptId!!
+        assertTrue(Regex("^[0-9a-f]{8}$").matches(tag))
+        assertEquals("/phone?at=$tag", upgradePaths.single())
+        client.stop()
+    }
+
+    @Test
+    fun transientFramesDoNotMoveTheCursor() = runBlocking {
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(onRequest = { socket, request ->
+            if (request.type == "c2s.test.push") {
+                socket.send(Envelope(type = FrameType.SESSION_DELTA, seq = 500,
+                    payload = BridgeJson.parseToJsonElement("""{"sessionId":"s1","streamId":"x","kind":"message.delta","text":"hi","ts":1}""")).encode())
+                socket.send(Envelope(type = FrameType.ACK, id = request.id, payload = JsonObject(emptyMap())).encode())
+            }
+        })))
+        val client = client()
+        client.start(credentials())
+        withTimeout(10_000) { client.state.first { it is ConnectionState.Authenticated } }
+        client.request("c2s.test.push")
+        assertEquals(7L, cursors.values["p1"])
         client.stop()
     }
 
