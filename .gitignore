@@ -16,3 +16,7 @@ captures/
 *.jks
 *.keystore
 keystore.properties
+
+# Local snapshot archives and checksums (regenerable, never commit)
+.*.tgz
+.main.md5
