@@ -17,12 +17,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The plugin repository owns the cross-client protocol fixtures. Checking
+      # it out lets AuthVectorsTest fail when the copy in this repository is stale.
+      - uses: actions/checkout@v4
+        with:
+          repository: Mars-Sea/dsh-deeppilot
+          path: .dsh-deeppilot
+          sparse-checkout: tests/fixtures
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
       - name: Test core and build debug APK
+        env:
+          DSH_DEEPPILOT_DIR: ${{ github.workspace }}/.dsh-deeppilot
         run: ./gradlew --stacktrace :core:test :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
