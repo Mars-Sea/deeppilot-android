@@ -27,7 +27,7 @@ DeepPilot 是 [DeepSeek Harness（DSH）](https://www.npmjs.com/package/dsh-deep
 
 ## 构建
 
-- JDK 17+，Android SDK（compileSdk 36），最低支持 Android 10（API 29）。
+- JDK 17–24（Gradle 8.14 不能在 JDK 25 上运行，报错只有一行版本号如 `25.0.3`；本机默认是 25 时用 `JAVA_HOME` 指向 17 或 21），Android SDK（compileSdk 36），最低支持 Android 10（API 29）。
 - `./gradlew :app:assembleDebug` 产出 debug APK。
 - `core` 模块是纯 Kotlin/JVM（协议、配对、签名、TLS 固定、连接客户端），没有 Android SDK 也能 `./gradlew :core:test`。
 

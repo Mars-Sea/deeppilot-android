@@ -16,4 +16,5 @@
   set by `.github/workflows/release.yml` from repository secrets.
 - No aggregator push SDKs (JPush, Getui, …). Phase 2 adds vendor channels directly.
 - User-facing strings go in `values/strings.xml` and `values-zh-rCN/strings.xml`.
-- Checks: `./gradlew :core:test :app:assembleDebug`.
+- Checks: `./gradlew :core:test :app:assembleDebug`. Run Gradle on JDK 17–24: Gradle 8.14 does not start on
+  JDK 25 and fails with nothing but the version number (`25.0.3`). Point `JAVA_HOME` at 17 or 21 instead.
