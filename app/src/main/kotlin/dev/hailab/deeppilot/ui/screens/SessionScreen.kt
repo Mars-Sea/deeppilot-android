@@ -146,6 +146,7 @@ fun SessionScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var showsTodos by remember { mutableStateOf(false) }
+    var showsGoal by remember { mutableStateOf(false) }
     var showsSchedules by remember { mutableStateOf(false) }
     val allPendingSends by repository.pendingSends.collectAsStateWithLifecycle()
     val pendingSends = allPendingSends.filter { it.sessionId == sessionId }
@@ -623,6 +624,10 @@ fun SessionScreen(
                     }
                 },
                 onOpenTodos = { showsTodos = true },
+                // Without goalView the host has no authoritative goal; nothing is guessed from messages.
+                goal = summary?.goal?.takeIf { capabilities?.goalView == true },
+                onOpenGoal = { showsGoal = true },
+                onLoadReferences = if (connected && capabilities?.references == true) ({ repository.loadReferences(sessionId, it) }) else null,
                 modifier = Modifier.padding(horizontal = 12.dp).padding(top = 6.dp),
             )
             Text(
@@ -740,6 +745,14 @@ fun SessionScreen(
         } else {
             ScheduleListSheet(repository = repository, sessionId = sessionId, onDismiss = { showsSchedules = false })
         }
+    }
+
+    summary?.goal?.takeIf { showsGoal && capabilities?.goalView == true }?.let { goal ->
+        ConversationSheet(
+            title = stringResource(R.string.goal_title),
+            subtitle = null,
+            onDismiss = { showsGoal = false },
+        ) { GoalDetailContent(goal) }
     }
 
     if (showsTodos) {

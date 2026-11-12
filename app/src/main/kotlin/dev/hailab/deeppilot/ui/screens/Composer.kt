@@ -5,6 +5,10 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import dev.hailab.deeppilot.core.protocol.SkillSummary
 import dev.hailab.deeppilot.core.skills.SkillQuery
+import dev.hailab.deeppilot.core.protocol.ReferenceCandidates
+import dev.hailab.deeppilot.core.protocol.SessionGoal
+import dev.hailab.deeppilot.core.references.ReferenceQuery
+import dev.hailab.deeppilot.core.references.ReferenceTextCompletion
 import dev.hailab.deeppilot.core.protocol.HostCommand
 import dev.hailab.deeppilot.core.protocol.CommandCatalog
 import androidx.compose.foundation.Canvas
@@ -124,6 +128,10 @@ fun PromptComposer(
     onPickSkill: (String?) -> Unit = {},
     onReadSkills: (suspend (Boolean, (List<SkillSummary>, Boolean) -> Unit) -> List<SkillSummary>)? = null,
     onReadCommands: (suspend (Boolean, (CommandCatalog, Boolean) -> Unit) -> CommandCatalog)? = null,
+    goal: SessionGoal? = null,
+    onOpenGoal: () -> Unit = {},
+    /** Non-null while the host offers `@` references and the bridge is connected. */
+    onLoadReferences: (suspend (String) -> ReferenceCandidates)? = null,
 ) {
     val p = palette
     var fieldValue by remember { mutableStateOf(TextFieldValue(draft, TextRange(draft.length))) }
@@ -141,7 +149,31 @@ fun PromptComposer(
         SkillQuery.detect(draft, fieldValue.selection.start, fieldValue.selection.end, fieldValue.composition != null)?.takeUnless { it == dismissed }
     } else null
 
+    // A dismissed panel stays away until the caret leaves that `@` word.
+    var dismissedReference by remember(skillCatalogScope) { mutableStateOf<Int?>(null) }
+    val detectedReference = if (focused && onLoadReferences != null && skillQuery == null && fieldValue.text == draft) {
+        ReferenceQuery.detect(draft, fieldValue.selection.start, fieldValue.selection.end, fieldValue.composition != null)
+    } else null
+    SideEffect { if (detectedReference == null && dismissedReference != null) dismissedReference = null }
+    val referenceQuery = detectedReference?.takeUnless { it.start == dismissedReference }
+    fun applyReference(edit: ReferenceTextCompletion?) {
+        if (edit == null) return
+        fieldValue = TextFieldValue(edit.text, TextRange(edit.caret))
+        onDraftChange(edit.text)
+        focusRequester.requestFocus()
+    }
+
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (onLoadReferences != null) {
+            ReferenceSuggestions(
+                query = referenceQuery,
+                scopeKey = skillCatalogScope,
+                load = onLoadReferences,
+                onPickFile = { file -> applyReference(referenceQuery?.complete(file, draft)) },
+                onPickSession = { session -> applyReference(referenceQuery?.complete(session, draft)) },
+                onDismiss = { dismissedReference = referenceQuery?.start },
+            )
+        }
         SkillSuggestions(
             query = skillQuery,
             catalogScope = skillCatalogScope,
@@ -183,6 +215,10 @@ fun PromptComposer(
         ) {
             if (todoItems.isNotEmpty()) {
                 TodoComposerStatus(todoItems, onOpenTodos, Modifier.padding(horizontal = AppSpacing.regular))
+                Box(Modifier.padding(horizontal = AppSpacing.regular).fillMaxWidth().height(0.5.dp).background(p.hairline))
+            }
+            if (goal != null) {
+                GoalComposerStatus(goal, onOpenGoal, Modifier.padding(horizontal = AppSpacing.regular))
                 Box(Modifier.padding(horizontal = AppSpacing.regular).fillMaxWidth().height(0.5.dp).background(p.hairline))
             }
             Column(

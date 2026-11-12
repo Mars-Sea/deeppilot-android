@@ -123,6 +123,7 @@ fun HostScheduleSheet(repository: BridgeRepository, filterSessionId: String?, on
     var page by remember { mutableStateOf<HostSchedulePage>(HostSchedulePage.Tasks) }
     var busy by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<HostScheduleTask?>(null) }
+    var clearingEnded by remember { mutableStateOf(false) }
     var failure by remember { mutableStateOf<Pair<String, String>?>(null) }
     var reloads by remember { mutableIntStateOf(0) }
 
@@ -249,6 +250,17 @@ fun HostScheduleSheet(repository: BridgeRepository, filterSessionId: String?, on
                                     }
                                 }
                             }
+                            // Host-wide and irreversible, so only from the full list and behind a confirmation.
+                            if (filterSessionId == null && list.tasks.any { it.status == HostTaskStatus.ENDED }) {
+                                SettingsCard {
+                                    Box(
+                                        Modifier.fillMaxWidth().plainClickable(enabled = !busy) { clearingEnded = true }.padding(12.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(stringResource(R.string.schedule_host_delete_ended), style = AppType.body, color = if (busy) p.tertiary else p.danger)
+                                    }
+                                }
+                            }
                             limitSeconds?.let { Footnote(stringResource(R.string.schedule_host_limits, it.toInt())) }
                             if (list.total > 0 && filterSessionId == null) Footnote(stringResource(R.string.schedule_host_total, list.tasks.size, list.total))
                             listError?.let { Footnote(it) }
@@ -315,6 +327,25 @@ fun HostScheduleSheet(repository: BridgeRepository, filterSessionId: String?, on
             title = { Text(stringResource(R.string.schedule_host_delete_confirm)) },
             confirmButton = { TextButton(onClick = { delete(task) }, enabled = !busy) { Text(stringResource(R.string.schedule_delete), color = p.danger) } },
             dismissButton = { TextButton(onClick = { deleting = null }) { Text(stringResource(R.string.action_cancel)) } },
+        )
+    }
+    if (clearingEnded) {
+        AlertDialog(
+            onDismissRequest = { clearingEnded = false },
+            title = { Text(stringResource(R.string.schedule_host_delete_ended_confirm)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        clearingEnded = false
+                        mutate(R.string.schedule_host_delete_ended) {
+                            repository.deleteEndedHostSchedules()
+                            null
+                        }
+                    },
+                    enabled = !busy,
+                ) { Text(stringResource(R.string.schedule_host_delete_ended), color = p.danger) }
+            },
+            dismissButton = { TextButton(onClick = { clearingEnded = false }) { Text(stringResource(R.string.action_cancel)) } },
         )
     }
     failure?.let { (title, message) ->

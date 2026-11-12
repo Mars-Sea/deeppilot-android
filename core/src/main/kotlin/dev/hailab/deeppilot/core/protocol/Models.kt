@@ -27,6 +27,8 @@ object FrameType {
 
     const val SESSION_OPEN = "c2s.session.open"
     const val SESSION_CLOSE = "c2s.session.close"
+    /** Replaces the connection's interest set (capability `sessionInterest`). */
+    const val SESSION_WATCH = "c2s.session.watch"
     const val SESSION_TAIL = "s2c.session.tail"
     const val SESSION_HISTORY = "c2s.session.history"
     const val HISTORY_PAGE = "s2c.history.page"
@@ -84,6 +86,10 @@ object FrameType {
     const val SCHEDULE_HOST_EDIT = "c2s.schedule.host.edit"
     const val SCHEDULE_HOST_RUN = "c2s.schedule.host.run"
     const val SCHEDULE_HOST_LIMITS = "c2s.schedule.host.limits"
+    const val SCHEDULE_HOST_DELETE_ENDED = "c2s.schedule.host.deleteEnded"
+
+    // Composer references (optional v2 extension, capability references)
+    const val SESSION_REFERENCES = "c2s.session.references"
 
     // Mobile commands and export (optional v2 extension, capability commands)
     const val SESSION_COMMANDS = "c2s.session.commands"
@@ -167,6 +173,14 @@ data class AuthProve(
     val appVersion: String,
     val resumeCursor: Long? = null,
     val signature: String,
+    /**
+     * Sessions whose events this connection wants besides the ones it opens
+     * (`sessionInterest`, at most 16). Present, even empty, it narrows live
+     * pushes and the replay; not part of the signed input.
+     */
+    val watchSessions: List<String>? = null,
+    /** Downlink encodings this client can inflate (§1.2); old bridges ignore it. */
+    val acceptEncoding: List<String>? = null,
 )
 
 @Serializable
@@ -202,7 +216,31 @@ data class WelcomeCapabilities(
     val pluginUpdate: Boolean = false,
     /** Export and attachment requests may ask for binary chunk frames (§1.1). */
     val binaryFrames: Boolean = false,
+    /** Large downlink frames may arrive deflated (§1.2). */
+    val compressedFrames: Boolean = false,
+    /** `watchSessions` on the proof and `c2s.session.watch`. */
+    val sessionInterest: Boolean = false,
+    /** `sinceSeq` on `c2s.session.open` and incremental tails. */
+    val incrementalTail: Boolean = false,
+    /** The welcome may carry `routes`. */
+    val routeHints: Boolean = false,
+    /** SessionSummary carries the host's authoritative `goal`. */
+    val goalView: Boolean = false,
+    /** `goal.completed` notifications. */
+    val goalNotifications: Boolean = false,
+    /** `c2s.session.references` for `@` completion. */
+    val references: Boolean = false,
 )
+
+/** Where the host can be reached right now (welcome `routes`, capability `routeHints`). */
+@Serializable
+data class LanRoute(val urls: List<String> = emptyList(), val tlsFingerprint: String? = null)
+
+@Serializable
+data class RemoteRoute(val url: String? = null)
+
+@Serializable
+data class HostRoutes(val lan: LanRoute? = null, val remote: RemoteRoute? = null)
 
 @Serializable
 data class Welcome(
@@ -213,6 +251,7 @@ data class Welcome(
     val capabilities: WelcomeCapabilities = WelcomeCapabilities(),
     @Serializable(with = LenientLongSerializer::class) val cursor: Long = 0,
     val resumed: Boolean = false,
+    @Serializable(with = LenientRoutesSerializer::class) val routes: HostRoutes? = null,
 )
 
 @Serializable
@@ -242,7 +281,42 @@ data class SessionSummary(
     val workspaceId: String? = null,
     val workspacePath: String? = null,
     val archived: Boolean = false,
+    /**
+     * The host's current goal (`goalView`). Absent and null both mean "show none";
+     * a summary replaces the previous one whole, so a missing goal clears it.
+     */
+    @Serializable(with = LenientGoalSerializer::class) val goal: SessionGoal? = null,
 )
+
+@Serializable
+data class GoalBlockedReason(val code: String? = null, val message: String? = null)
+
+/** One goal that spans turns (§3). Unknown [phase] / [activation] strings are kept as-is. */
+@Serializable
+data class SessionGoal(
+    val id: String,
+    @Serializable(with = LenientLongSerializer::class) val revision: Long = 0,
+    val objective: String = "",
+    /** active | paused | blocked | complete */
+    val phase: String = "",
+    /** armed | disarmed; null is unknown and must not be read as armed. */
+    val activation: String? = null,
+    @Serializable(with = LenientLongSerializer::class) val roundsStarted: Long = 0,
+    @Serializable(with = LenientLongSerializer::class) val maxGoalRounds: Long? = null,
+    @Serializable(with = LenientLongSerializer::class) val createdAt: Long = 0,
+    @Serializable(with = LenientLongSerializer::class) val updatedAt: Long = 0,
+    val blockedReason: GoalBlockedReason? = null,
+) {
+    val isActive: Boolean get() = phase == PHASE_ACTIVE
+    val isTerminal: Boolean get() = phase == PHASE_COMPLETE || phase == PHASE_BLOCKED
+
+    companion object {
+        const val PHASE_ACTIVE = "active"
+        const val PHASE_PAUSED = "paused"
+        const val PHASE_BLOCKED = "blocked"
+        const val PHASE_COMPLETE = "complete"
+    }
+}
 
 @Serializable
 data class SessionsSnapshot(
@@ -269,6 +343,30 @@ data class ToolInfo(
     val state: String = "running",
     val summary: String = "",
     val callId: String? = null,
+    /** What the call acts on; set at call time and kept when the result merges in. */
+    val target: ToolTarget? = null,
+    /** The change a file-editing call asked for; only the fragment, never the whole file. */
+    val edit: ToolEdit? = null,
+)
+
+/** [kind] is an open vocabulary (path | command | pattern | url | text); unknown reads as text. */
+@Serializable
+data class ToolTarget(
+    val kind: String = "text",
+    val value: String = "",
+    val label: String? = null,
+    val scope: String? = null,
+)
+
+/** [operation] is replace | create | insert. Both texts are absent when [truncated]. */
+@Serializable
+data class ToolEdit(
+    val path: String = "",
+    val operation: String = "replace",
+    val oldText: String? = null,
+    val newText: String? = null,
+    @Serializable(with = LenientLongSerializer::class) val insertLine: Long? = null,
+    val truncated: Boolean = false,
 )
 
 @Serializable
@@ -301,7 +399,15 @@ data class MessageProjection(
 )
 
 @Serializable
-data class SessionOpen(val sessionId: String, val tailCount: Int? = null)
+data class SessionOpen(
+    val sessionId: String,
+    val tailCount: Int? = null,
+    /** The seq this client is fully synced to; only with `incrementalTail`. */
+    val sinceSeq: Long? = null,
+)
+
+@Serializable
+data class SessionWatch(val sessionIds: List<String>)
 
 @Serializable
 data class SessionRef(val sessionId: String)
@@ -312,6 +418,9 @@ data class SessionTail(
     @Serializable(with = MessageListSerializer::class) val messages: List<MessageProjection> = emptyList(),
     @Serializable(with = LenientLongSerializer::class) val oldestSeq: Long = 0,
     val hasMore: Boolean = false,
+    /** True when [messages] holds only the rows changed after [sinceSeq]. */
+    val incremental: Boolean = false,
+    @Serializable(with = LenientLongSerializer::class) val sinceSeq: Long? = null,
 )
 
 @Serializable
@@ -336,7 +445,12 @@ data class SessionEvent(
 data class DeltaBody(val text: String? = null)
 
 @Serializable
-data class TurnEndBody(val ok: Boolean? = null)
+data class TurnEndBody(
+    val ok: Boolean? = null,
+    /** Normalized error text of a turn that ended abnormally. */
+    val text: String? = null,
+    @Serializable(with = LenientLongSerializer::class) val ts: Long? = null,
+)
 
 @Serializable
 data class ToolEndBody(
@@ -449,6 +563,7 @@ data class QuestionRespond(val requestId: String, val answers: List<QuestionAnsw
 
 object NotifyCategory {
     const val TURN_COMPLETED = "turn.completed"
+    const val GOAL_COMPLETED = "goal.completed"
     const val APPROVAL_REQUIRED = "approval.required"
     const val QUESTION_ASKED = "question.asked"
     const val SESSION_ERROR = "session.error"
@@ -726,4 +841,36 @@ data class ScheduleUpdated(
     val task: ScheduleTask? = null,
     val deleted: Boolean = false,
     val replayed: Boolean = false,
+)
+
+// ---------- composer references (optional v2 extension) ----------
+
+@Serializable
+data class ReferencesRequest(val sessionId: String, val query: String)
+
+/** [kind] is file | directory. */
+@Serializable
+data class FileReference(val path: String, val kind: String = "file")
+
+@Serializable
+data class SessionReference(
+    val sessionId: String,
+    val label: String = "",
+    /** The canonical `@[label](dsh-session:…)` text, sent to the host unchanged. */
+    val mention: String = "",
+    val sameWorkspace: Boolean = false,
+)
+
+@Serializable
+data class FileReferences(val available: Boolean = false, val items: List<FileReference> = emptyList())
+
+@Serializable
+data class SessionReferences(val available: Boolean = false, val items: List<SessionReference> = emptyList())
+
+@Serializable
+data class ReferenceCandidates(
+    val sessionId: String = "",
+    val query: String = "",
+    val files: FileReferences = FileReferences(),
+    val sessions: SessionReferences = SessionReferences(),
 )

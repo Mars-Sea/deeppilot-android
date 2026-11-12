@@ -1,5 +1,7 @@
 package dev.hailab.deeppilot
 
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.app.Application
 import dev.hailab.deeppilot.attachments.AttachmentImages
 import dev.hailab.deeppilot.bridge.AppVisibility
@@ -38,7 +40,19 @@ class AppGraph(private val app: Application) {
         appVersion = BuildConfig.VERSION_NAME,
         cursorStore = store,
         parentScope = scope,
+        lanEligible = ::onLocalNetwork,
+        watchSessions = { watched() },
     )
+
+    /** Set once the repository exists; the client is built first. */
+    private var watched: () -> List<String>? = { null }
+
+    /** Wi-Fi or Ethernet: the only networks where the computer's LAN address can answer. */
+    private fun onLocalNetwork(): Boolean = runCatching {
+        val manager = app.getSystemService(ConnectivityManager::class.java)
+        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return@runCatching false
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }.getOrDefault(false)
 
     val repository = BridgeRepository(
         client = client,
@@ -63,6 +77,7 @@ class AppGraph(private val app: Application) {
     val onboarding = OnboardingState(onboardingPrefs)
 
     fun start() {
+        watched = repository::watchedSessions
         notifier.createChannels()
         visibility.install(onForeground = { client.poke() })
         repository.start()

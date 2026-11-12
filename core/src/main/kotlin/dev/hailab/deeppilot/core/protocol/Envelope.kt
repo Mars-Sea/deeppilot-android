@@ -84,6 +84,35 @@ data class Envelope(
             return header.copy(body = bytes.copyOfRange(headerEnd, bytes.size))
         }
 
+        /** Format byte of a deflated text frame (§1.2). */
+        const val COMPRESSED_FORMAT: Int = 2
+        const val DEFLATE_RAW = "deflate-raw"
+
+        /**
+         * `[format u8 = 2][deflate-raw of the whole envelope JSON]` (§1.2): the text
+         * frame it stands for, or null when it is malformed or inflates past [maxBytes].
+         */
+        fun inflate(bytes: ByteArray, maxBytes: Int): String? {
+            if (bytes.size < 2 || bytes[0].toInt() and 0xff != COMPRESSED_FORMAT) return null
+            val inflater = java.util.zip.Inflater(true)
+            return try {
+                inflater.setInput(bytes, 1, bytes.size - 1)
+                val out = java.io.ByteArrayOutputStream(minOf(maxBytes, bytes.size * 4))
+                val buffer = ByteArray(16 * 1024)
+                while (!inflater.finished()) {
+                    val read = inflater.inflate(buffer)
+                    if (read == 0 && (inflater.needsInput() || inflater.needsDictionary())) return null
+                    if (out.size() + read > maxBytes) return null
+                    out.write(buffer, 0, read)
+                }
+                String(out.toByteArray(), Charsets.UTF_8)
+            } catch (_: java.util.zip.DataFormatException) {
+                null
+            } finally {
+                inflater.end()
+            }
+        }
+
         fun <T> request(
             type: String,
             serializer: KSerializer<T>,

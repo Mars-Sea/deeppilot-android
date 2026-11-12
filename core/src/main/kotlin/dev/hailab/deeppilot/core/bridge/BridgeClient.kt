@@ -10,6 +10,7 @@ import dev.hailab.deeppilot.core.protocol.BridgeJson
 import dev.hailab.deeppilot.core.protocol.Envelope
 import dev.hailab.deeppilot.core.protocol.ErrorPayload
 import dev.hailab.deeppilot.core.protocol.FrameType
+import dev.hailab.deeppilot.core.protocol.HostRoutes
 import dev.hailab.deeppilot.core.protocol.PROTOCOL_VERSION
 import dev.hailab.deeppilot.core.protocol.Welcome
 import dev.hailab.deeppilot.core.protocol.WireErrorCode
@@ -54,6 +55,8 @@ data class HostCredentials(
     val deviceId: String,
     val audience: String,
     val tlsFingerprint: String?,
+    /** Addresses the host announced in its last welcome (`routeHints`); null before the first. */
+    val routes: HostRoutes? = null,
 )
 
 /** Persists the replay cursor (§7) per profile. */
@@ -100,6 +103,13 @@ class BridgeClient(
     parentScope: CoroutineScope,
     private val backoff: Backoff = Backoff(),
     private val pingIntervalMillis: Long = 25_000,
+    /** Whether the LAN route is worth trying: true on Wi-Fi or Ethernet. */
+    private val lanEligible: () -> Boolean = { true },
+    /**
+     * Sessions to keep receiving events for, besides the ones opened later
+     * (`watchSessions`). Null leaves the connection on "every session".
+     */
+    private val watchSessions: () -> List<String>? = { null },
 ) {
     private val serial = Dispatchers.Default.limitedParallelism(1)
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]) + serial)
@@ -111,9 +121,14 @@ class BridgeClient(
     /** Every inbound frame after the client has handled it. */
     val frames: SharedFlow<Envelope> = _frames.asSharedFlow()
 
-    private var credentials: HostCredentials? = null
-    private var http: OkHttpClient? = null
+    @Volatile private var credentials: HostCredentials? = null
     private var trust: PinnedTrustManager? = null
+    /** The routes of the current round and the one the newest socket uses. */
+    private var candidates: List<Route> = emptyList()
+    private var candidateIndex = 0
+    private var route: Route? = null
+    private var lanFailedAt: Long? = null
+    private var networkKey: String? = null
     private var socket: WebSocket? = null
     /** When the current socket was opened, to tell a fresh handshake from a stuck one. */
     private var socketOpenedAt = 0L
@@ -138,14 +153,16 @@ class BridgeClient(
     @Volatile var attemptId: String? = null
         private set
 
+    /** The route of the authenticated connection, for diagnostics; null while not connected. */
+    @Volatile var activeRoute: Route? = null
+        private set
+
     /** Connects to [creds], replacing any current host. */
     fun start(creds: HostCredentials) {
         scope.launch {
             closeSocket(reconnect = false)
             credentials = creds
-            val (client, pinned) = BridgeTls.client(baseHttp, creds.tlsFingerprint)
-            http = client
-            trust = pinned
+            lanFailedAt = null
             lastCursor = cursorStore.load(creds.profileId)
             authRejected = false
             attempt = 0
@@ -186,6 +203,30 @@ class BridgeClient(
                 }
             }
         }
+    }
+
+    /**
+     * The default network changed; [key] names the new one. Besides [poke], a new
+     * network forgets the LAN failure, and a connection that is on the public
+     * route moves to the LAN when one is now worth trying and nothing is in flight.
+     */
+    fun networkChanged(key: String?) {
+        scope.launch {
+            val creds = credentials
+            // The first report only names the network the app started on.
+            val changed = networkKey != null && key != networkKey
+            networkKey = key
+            if (!changed || creds == null || authRejected) return@launch
+            lanFailedAt = null
+            val current = route
+            val lanFirst = RouteSelector.candidates(creds, lanEligible(), lanRecentlyFailed = false).first().kind == Route.Kind.Lan
+            if (authenticated && current != null && current.kind != Route.Kind.Lan && lanFirst && pending.isEmpty()) {
+                attempt = 0
+                closeSocket(reconnect = true)
+                openSocket()
+            }
+        }
+        poke()
     }
 
     private fun probe() {
@@ -259,14 +300,28 @@ class BridgeClient(
 
     // ---------- socket lifecycle (serial) ----------
 
-    private fun openSocket() {
+    /** Opens the next socket: the first route of a new round, or the next one of this round. */
+    private fun openSocket(nextInRound: Boolean = false) {
         val creds = credentials ?: return
-        val client = http ?: return
-        val endpoints = HostEndpoints.of(creds.host)
+        if (nextInRound) {
+            candidateIndex += 1
+        } else {
+            val failedAt = lanFailedAt
+            val recentlyFailed = failedAt != null &&
+                System.nanoTime() - failedAt < RouteSelector.LAN_FAILURE_MEMORY_MILLIS * 1_000_000
+            candidates = RouteSelector.candidates(creds, lanEligible(), recentlyFailed)
+            candidateIndex = 0
+        }
+        val next = candidates.getOrNull(candidateIndex) ?: return
+        val endpoints = HostEndpoints.of(next.url)
         if (endpoints == null) {
-            fail(FailureReason.InvalidHost)
+            if (candidateIndex < candidates.lastIndex) openSocket(nextInRound = true) else fail(FailureReason.InvalidHost)
             return
         }
+        val timeout = if (next.quick) RouteSelector.LAN_CONNECT_TIMEOUT_MILLIS else 10_000L
+        val (client, pinned) = BridgeTls.client(baseHttp, next.tlsFingerprint, timeout)
+        route = next
+        trust = pinned
         epoch += 1
         val socketEpoch = epoch
         _state.value = ConnectionState.Connecting(attempt)
@@ -286,6 +341,7 @@ class BridgeClient(
         socket?.cancel()
         socket = null
         authenticated = false
+        activeRoute = null
         failAllPending()
         if (!reconnect) attempt = 0
     }
@@ -322,12 +378,19 @@ class BridgeClient(
         epoch += 1
         pingJob?.cancel()
         socket = null
+        val reached = authenticated
         authenticated = false
+        activeRoute = null
         failAllPending()
         if (authRejected) return
+        // A LAN route that never got as far as a welcome is remembered as unreachable.
+        if (!reached && route?.kind == Route.Kind.Lan) lanFailedAt = System.nanoTime()
         when {
             closeCode == 4401 && closeReason == "device revoked" -> fail(FailureReason.DeviceRevoked)
             closeCode in AUTH_FAILURE_CODES -> fail(FailureReason.AuthRejected(closeCode))
+            // Another route of this round is left: try it now, without backoff. Only the
+            // last one may end the round, so a stale hint never asks the user to pair again.
+            !reached && candidateIndex < candidates.lastIndex -> openSocket(nextInRound = true)
             error != null && trust?.lastRejection != null -> fail(FailureReason.Untrusted(trust!!.lastRejection!!))
             else -> scheduleReconnect(retryAfterMillis)
         }
@@ -360,8 +423,14 @@ class BridgeClient(
                     return
                 }
                 if (!welcome.resumed) replaceCursor(welcome.cursor)
+                // Announced over an authenticated connection, so trusted; replaced on every welcome.
+                if (welcome.capabilities.routeHints) {
+                    credentials = credentials?.let { RouteSelector.adopt(it, welcome.routes) }
+                }
                 attempt = 0
                 authenticated = true
+                activeRoute = route
+                if (route?.kind == Route.Kind.Lan) lanFailedAt = null
                 _state.value = ConnectionState.Authenticated(welcome)
                 startPing()
             }
@@ -375,8 +444,13 @@ class BridgeClient(
      * `binary: true`: it goes to that request's progress handler and nowhere else,
      * never to [frames] and never to the cursor. Anything else is dropped.
      */
-    private fun handleBinaryFrame(socketEpoch: Int, bytes: ByteArray) {
+    private suspend fun handleBinaryFrame(socketEpoch: Int, bytes: ByteArray) {
         if (socketEpoch != epoch || bytes.size > MAX_INBOUND_FRAME_BYTES) return
+        // Format 2 (§1.2) is an ordinary text frame, deflated: any type, seq and replay included.
+        if (bytes.isNotEmpty() && bytes[0].toInt() and 0xff == Envelope.COMPRESSED_FORMAT) {
+            Envelope.inflate(bytes, MAX_INBOUND_FRAME_BYTES)?.let { handleFrame(socketEpoch, it) }
+            return
+        }
         val envelope = Envelope.parseBinary(bytes) ?: return
         val id = envelope.id ?: return
         if (envelope.type !in FrameType.CHUNK_TYPES || !progress.containsKey(id)) return
@@ -420,6 +494,8 @@ class BridgeClient(
             appVersion = appVersion,
             resumeCursor = lastCursor,
             signature = signature,
+            watchSessions = watchSessions()?.distinct()?.take(MAX_WATCHED_SESSIONS),
+            acceptEncoding = listOf(Envelope.DEFLATE_RAW),
         )
         sendLocked(
             Envelope(
@@ -505,6 +581,8 @@ class BridgeClient(
          * auth timeout (a slow network, a phone that dozed mid-handshake), so it retries.
          */
         private val AUTH_FAILURE_CODES = setOf(4401, 4500)
+        /** The bridge takes at most this many `watchSessions` (§2.2). */
+        const val MAX_WATCHED_SESSIONS = 16
         /** A handshake younger than this is not aborted by [poke]; connectTimeout is 10 s. */
         private const val HANDSHAKE_GRACE_NANOS = 15_000_000_000L
         /** The bridge blocks for up to 15 min; retry at least every minute so recovery is seen. */

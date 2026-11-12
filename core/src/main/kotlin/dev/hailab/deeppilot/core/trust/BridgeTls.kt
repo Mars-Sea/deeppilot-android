@@ -60,9 +60,13 @@ object BridgeTls {
      * An OkHttp client for one host. With a [fingerprint] only that SPKI passes;
      * without one the platform trust store decides (Funnel / public CA).
      */
-    fun client(base: OkHttpClient, fingerprint: String?): Pair<OkHttpClient, PinnedTrustManager?> {
+    fun client(
+        base: OkHttpClient,
+        fingerprint: String?,
+        connectTimeoutMillis: Long = 10_000,
+    ): Pair<OkHttpClient, PinnedTrustManager?> {
         val builder = base.newBuilder()
-            .connectTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(connectTimeoutMillis, TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             // WebSocket-level pings fail a half-open socket (Wi-Fi gone, NAT expired)
             // within a minute instead of leaving it "connected" until the next poke.

@@ -14,7 +14,7 @@ target_dir="$here/core/src/test/resources/protocol-fixtures"
 
 # Only the fixtures this client implements. Add a file here together with the
 # test that reads it.
-fixtures="auth-vectors.json"
+fixtures="auth-vectors.json session-goal.json"
 
 [ -d "$source_dir" ] || { echo "no dsh-deeppilot checkout at $plugin" >&2; exit 1; }
 

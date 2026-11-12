@@ -183,7 +183,13 @@ data class HostScheduleUpdated(
     val task: HostScheduleTask? = null,
     val deleted: Boolean = false,
     val replayed: Boolean = false,
+    /** Rows removed by `c2s.schedule.host.deleteEnded`; absent on a replayed receipt. */
+    val deletedEnded: Int? = null,
 )
+
+/** `c2s.schedule.host.deleteEnded`: removes every ended task. Never retried automatically. */
+@Serializable
+data class HostScheduleDeleteEnded(val clientRequestId: String)
 
 @Serializable
 data class HostScheduleLimits(val newSessionIntervalSeconds: Double? = null)

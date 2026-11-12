@@ -32,7 +32,8 @@ class ConnectionService : LifecycleService() {
         // A new network usually means the old socket is dead; reconnect without waiting for backoff.
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                graph.client.poke()
+                // Also lets a connection on the public route move to the LAN after coming home.
+                graph.client.networkChanged(network.toString())
             }
         }
         runCatching {

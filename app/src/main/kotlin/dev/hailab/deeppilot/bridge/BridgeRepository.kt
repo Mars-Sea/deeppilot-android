@@ -196,6 +196,30 @@ class BridgeRepository(
 
     private val deduper = NotificationDeduper()
 
+    /**
+     * What the handshake declares as `watchSessions`: only the conversation on
+     * screen. Nothing else here reads session events, so every other session's
+     * events (live and replayed) would only cost data; the open call after the
+     * welcome fetches whatever a narrowed replay left out.
+     */
+    fun watchedSessions(): List<String> = listOfNotNull(_openSession.value?.sessionId)
+
+    /** `c2s.session.open` for [sessionId], incremental when the host and the local copy allow it. */
+    private suspend fun sendOpen(sessionId: String, full: Boolean = false) {
+        val open = _openSession.value?.takeIf { it.sessionId == sessionId }
+        val since = open?.syncedSeq?.takeIf { !full && _capabilities.value?.incrementalTail == true && open.messages.isNotEmpty() }
+        client.send(FrameType.SESSION_OPEN, SessionOpen.serializer(), SessionOpen(sessionId, TAIL_COUNT, since))
+    }
+
+    /** Saves the addresses (and, for a LAN pairing, the pin) the welcome announced. */
+    private fun adoptRoutes() {
+        val adopted = client.currentCredentials ?: return
+        val current = _host.value ?: return
+        if (adopted.profileId != current.profileId || adopted == current) return
+        commitRoster(_roster.value.updating(current.profileId) { it.copy(routes = adopted.routes, tlsFingerprint = adopted.tlsFingerprint) })
+        _host.value = adopted
+    }
+
     fun start() {
         drafts.bind(_host.value?.profileId)
         _host.value?.let { restoreSessions(it.profileId) }
@@ -360,13 +384,11 @@ class BridgeRepository(
     }
 
     /** Paints a conversation from the cache while the host's tail is on its way, or offline. */
-    private fun restoreConversation(profileId: String, sessionId: String) {
-        scope.launch {
-            val cached = cache.loadConversation(profileId, sessionId) ?: return@launch
-            _openSession.update { open ->
-                if (open == null || open.sessionId != sessionId || open.messages.isNotEmpty() || _host.value?.profileId != profileId) open
-                else open.copy(messages = cached.messages, hasMore = cached.hasMore, loaded = true)
-            }
+    private suspend fun restoreConversation(profileId: String, sessionId: String) {
+        val cached = cache.loadConversation(profileId, sessionId) ?: return
+        _openSession.update { open ->
+            if (open == null || open.sessionId != sessionId || open.messages.isNotEmpty() || _host.value?.profileId != profileId) open
+            else open.copy(messages = cached.messages, hasMore = cached.hasMore, loaded = true, syncedSeq = cached.syncedSeq)
         }
     }
 
@@ -399,7 +421,7 @@ class BridgeRepository(
         scope.launch {
             client.send(FrameType.SESSIONS_LIST)
             if (_capabilities.value?.pendingSnapshot == true) client.send(FrameType.PENDING_LIST)
-            _openSession.value?.let { client.send(FrameType.SESSION_OPEN, SessionOpen.serializer(), SessionOpen(it.sessionId, TAIL_COUNT)) }
+            _openSession.value?.let { sendOpen(it.sessionId) }
         }
         _schedules.value?.let { loadSchedules(it.sessionId) }
     }
@@ -407,13 +429,17 @@ class BridgeRepository(
     fun openSession(sessionId: String) {
         visibility.setViewingSession(sessionId)
         notifier.cancelSession(sessionId)
-        if (_openSession.value?.sessionId != sessionId) {
+        val fresh = _openSession.value?.sessionId != sessionId
+        if (fresh) {
             clearStreams()
             val running = _sessions.value.firstOrNull { it.id == sessionId }?.status == "running"
             _openSession.value = OpenSession(sessionId, turnRunning = running)
-            _host.value?.let { restoreConversation(it.profileId, sessionId) }
         }
-        scope.launch { client.send(FrameType.SESSION_OPEN, SessionOpen.serializer(), SessionOpen(sessionId, TAIL_COUNT)) }
+        scope.launch {
+            // The cached copy first: it paints at once and tells the host where to resume from.
+            if (fresh) _host.value?.let { restoreConversation(it.profileId, sessionId) }
+            sendOpen(sessionId)
+        }
     }
 
     fun closeSession(sessionId: String) {
@@ -918,6 +944,15 @@ class BridgeRepository(
         hostScheduleRequest(FrameType.SCHEDULE_HISTORY, HostScheduleHistoryRequest.serializer(), HostScheduleHistoryRequest(taskId, before = before))
             .decode(ScheduleHistoryPayload.serializer())?.history?.takeIf { it.id == taskId } ?: throw InvalidResponseException()
 
+    /**
+     * Removes every ended task on the host. Returns how many went, or null when the
+     * host only confirmed a replay. Never retried: a failed batch may be half done.
+     */
+    suspend fun deleteEndedHostSchedules(): Int? {
+        val body = HostScheduleDeleteEnded(ClientRequestId.make())
+        return hostScheduleUpdated(FrameType.SCHEDULE_HOST_DELETE_ENDED, HostScheduleDeleteEnded.serializer(), body, body.clientRequestId).deletedEnded
+    }
+
     private suspend fun <T> hostScheduleRequest(type: String, serializer: kotlinx.serialization.KSerializer<T>, payload: T): Envelope =
         hostScheduleRequest(type, BridgeJson.encodeToJsonElement(serializer, payload))
 
@@ -930,6 +965,18 @@ class BridgeRepository(
     private suspend fun <T> hostScheduleUpdated(type: String, serializer: kotlinx.serialization.KSerializer<T>, payload: T, requestId: String): HostScheduleUpdated =
         hostScheduleRequest(type, serializer, payload).decode(HostScheduleUpdated.serializer())
             ?.takeIf { it.clientRequestId == requestId } ?: throw InvalidResponseException()
+
+    // ---------- composer references ----------
+
+    /** Files and other sessions matching what follows `@` in the composer. */
+    suspend fun loadReferences(sessionId: String, query: String): ReferenceCandidates {
+        requireAuthenticated()
+        if (_capabilities.value?.references != true) throw UnsupportedFeatureException()
+        val reply = client.request(FrameType.SESSION_REFERENCES, ReferencesRequest.serializer(), ReferencesRequest(sessionId, query), timeoutMillis = 8_000)
+        // The echo is how a late answer to an older keystroke is told apart.
+        return reply.decode(ReferenceCandidates.serializer())?.takeIf { it.sessionId == sessionId && it.query == query }
+            ?: throw InvalidResponseException()
+    }
 
     private fun requireSchedules() {
         requireAuthenticated()
@@ -947,6 +994,7 @@ class BridgeRepository(
             FrameType.WELCOME -> {
                 invalidateConnectionScopedState()
                 _capabilities.value = envelope.decode(Welcome.serializer())?.capabilities
+                adoptRoutes()
                 refresh()
                 reconcileDeliveries()
             }
@@ -994,14 +1042,31 @@ class BridgeRepository(
                 persistSessions()
             }
             FrameType.SESSION_TAIL -> envelope.decode(SessionTail.serializer())?.let { tail ->
+                var mismatched = false
                 _openSession.update { open ->
+                    mismatched = false
                     if (open == null || open.sessionId != tail.sessionId) return@update open
+                    if (!tail.incremental) {
+                        return@update open.copy(
+                            messages = SessionReducer.mergeTail(open.messages, tail.messages, tail.oldestSeq),
+                            hasMore = tail.hasMore,
+                            loaded = true,
+                            syncedSeq = SessionReducer.syncedSeq(tail.messages),
+                        )
+                    }
+                    // An increment only fits the copy it was asked for; paging state is left alone (§4).
+                    val since = tail.sinceSeq
+                    if (since == null || since != open.syncedSeq || open.messages.isEmpty()) {
+                        mismatched = true
+                        return@update open
+                    }
                     open.copy(
-                        messages = SessionReducer.mergeTail(open.messages, tail.messages, tail.oldestSeq),
-                        hasMore = tail.hasMore,
+                        messages = SessionReducer.mergeIncremental(open.messages, tail.messages, since),
                         loaded = true,
+                        syncedSeq = SessionReducer.syncedSeq(tail.messages, since),
                     )
                 }
+                if (mismatched) scope.launch { sendOpen(tail.sessionId, full = true) }
                 persistConversation(tail.sessionId)
             }
             FrameType.HISTORY_PAGE -> envelope.decode(HistoryPage.serializer())?.let { page ->

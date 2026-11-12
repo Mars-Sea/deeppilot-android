@@ -1,6 +1,7 @@
 package dev.hailab.deeppilot.core.hosts
 
 import dev.hailab.deeppilot.core.bridge.HostCredentials
+import dev.hailab.deeppilot.core.protocol.HostRoutes
 import kotlinx.serialization.Serializable
 
 /** One paired computer (iOS `InstanceProfile`). The device key lives in the Keystore under [id]. */
@@ -13,8 +14,10 @@ data class HostProfile(
     val audience: String,
     /** SPKI pin of a LAN host's self-signed certificate; null behind a public certificate. */
     val tlsFingerprint: String? = null,
+    /** Addresses the host last announced in a welcome; never part of the pairing itself. */
+    val routes: HostRoutes? = null,
 ) {
-    fun credentials() = HostCredentials(id, host, deviceId, audience, tlsFingerprint)
+    fun credentials() = HostCredentials(id, host, deviceId, audience, tlsFingerprint, routes)
 }
 
 /**

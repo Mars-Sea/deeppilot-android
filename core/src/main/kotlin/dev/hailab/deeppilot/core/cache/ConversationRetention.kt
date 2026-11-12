@@ -12,6 +12,8 @@ data class CachedConversation(
     val messages: List<MessageProjection>,
     /** Older rows exist on the host beyond the cached window. */
     val hasMore: Boolean,
+    /** [OpenSession.syncedSeq] at save time, so a cold open can ask for an incremental tail. */
+    val syncedSeq: Long? = null,
 )
 
 /**
@@ -34,6 +36,8 @@ object ConversationRetention {
             sessionId = state.sessionId,
             messages = kept.map { if (it.streaming) it.copy(streaming = false) else it },
             hasMore = state.hasMore || kept.size < rows.size,
+            // Only valid while the cached window still reaches it.
+            syncedSeq = state.syncedSeq?.takeIf { synced -> kept.firstOrNull()?.let { it.seq <= synced } == true },
         )
     }
 

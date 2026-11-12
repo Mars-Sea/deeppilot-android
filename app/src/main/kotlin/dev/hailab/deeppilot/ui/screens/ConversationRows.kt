@@ -61,7 +61,10 @@ import dev.hailab.deeppilot.R
 import dev.hailab.deeppilot.bridge.BridgeRepository
 import dev.hailab.deeppilot.core.protocol.MessageAttachment
 import dev.hailab.deeppilot.core.protocol.MessageProjection
+import dev.hailab.deeppilot.core.protocol.ToolEdit
 import dev.hailab.deeppilot.core.protocol.ToolInfo
+import dev.hailab.deeppilot.core.session.EditDiff
+import dev.hailab.deeppilot.core.session.EditLine
 import dev.hailab.deeppilot.core.session.Timeline
 import dev.hailab.deeppilot.core.session.TimelineItem
 import dev.hailab.deeppilot.ui.AppRadius
@@ -516,12 +519,63 @@ private fun ToolActivityDetail(tool: ToolInfo) {
                 )
                 Text(state.title(), style = AppType.caption2, color = state.color())
             }
-            toolSummary(tool.summary)?.let {
+            // The target says what the call acts on and survives the result; the summary
+            // turns into the result text, so it only stands in when there is no target.
+            val target = tool.target?.takeIf { it.value.isNotBlank() }
+            if (target != null) {
+                target.label?.takeIf { it.isNotBlank() }?.let { Text(it, style = AppType.caption2, color = p.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 SelectionContainer {
-                    Text(it, style = MonoSmall, color = p.secondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        target.value,
+                        style = MonoSmall,
+                        color = p.secondary,
+                        maxLines = 2,
+                        // Paths are told apart by their end, commands and patterns by their start.
+                        overflow = if (target.kind == "path") TextOverflow.StartEllipsis else TextOverflow.Ellipsis,
+                    )
+                }
+                target.scope?.takeIf { it.isNotBlank() }?.let {
+                    Text(stringResource(R.string.tool_target_scope, it), style = AppType.caption2, color = p.tertiary, maxLines = 1, overflow = TextOverflow.StartEllipsis)
+                }
+            } else {
+                toolSummary(tool.summary)?.let {
+                    SelectionContainer {
+                        Text(it, style = MonoSmall, color = p.secondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
+            tool.edit?.let { ToolEditPreview(it) }
         }
+    }
+}
+
+/** The changed lines of a file edit: removed in red, added in green, long changes cut short. */
+@Composable
+private fun ToolEditPreview(edit: ToolEdit) {
+    val p = palette
+    if (edit.truncated) {
+        Text(stringResource(R.string.tool_edit_truncated), style = AppType.caption2, color = p.tertiary)
+        return
+    }
+    val preview = remember(edit) { EditDiff.preview(edit) } ?: return
+    Column(
+        Modifier.fillMaxWidth().background(p.mutedSurface, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        if (edit.operation == "insert") {
+            edit.insertLine?.let { Text(stringResource(R.string.tool_edit_insert_at, it.toInt()), style = AppType.caption2, color = p.tertiary) }
+        }
+        preview.lines.forEach { line ->
+            val removed = line.kind == EditLine.Kind.Removed
+            Text(
+                (if (removed) "− " else "+ ") + line.text,
+                style = MonoSmall,
+                color = if (removed) p.danger else p.success,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (preview.hidden > 0) Text(stringResource(R.string.tool_edit_more, preview.hidden), style = AppType.caption2, color = p.tertiary)
     }
 }
 

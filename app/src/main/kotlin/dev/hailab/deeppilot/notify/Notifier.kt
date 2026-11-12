@@ -51,6 +51,7 @@ class Notifier(private val context: Context) {
             NotifyCategory.APPROVAL_REQUIRED -> CHANNEL_INTERACTIONS to R.string.notify_approval
             NotifyCategory.QUESTION_ASKED -> CHANNEL_INTERACTIONS to R.string.notify_question
             NotifyCategory.SESSION_ERROR -> CHANNEL_ERRORS to R.string.notify_error
+            NotifyCategory.GOAL_COMPLETED -> CHANNEL_TURNS to R.string.notify_goal_completed
             else -> CHANNEL_TURNS to R.string.notify_turn_completed
         }
         val title = notify.title.ifBlank { sessionTitle?.takeIf { it.isNotBlank() } ?: context.getString(fallbackTitle) }
@@ -123,6 +124,7 @@ class Notifier(private val context: Context) {
 
         private val CATEGORIES = listOf(
             NotifyCategory.TURN_COMPLETED,
+            NotifyCategory.GOAL_COMPLETED,
             NotifyCategory.APPROVAL_REQUIRED,
             NotifyCategory.QUESTION_ASKED,
             NotifyCategory.SESSION_ERROR,

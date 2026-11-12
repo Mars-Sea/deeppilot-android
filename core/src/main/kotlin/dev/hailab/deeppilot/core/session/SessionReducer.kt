@@ -19,6 +19,12 @@ data class OpenSession(
     val turnRunning: Boolean = false,
     /** True once the first tail arrived. */
     val loaded: Boolean = false,
+    /**
+     * The seq the last tail (full or incremental) covered, sent back as `sinceSeq`.
+     * Deliberately not the newest live event: a session outside the interest set
+     * misses events, so anything past the last tail may have gaps (§4).
+     */
+    val syncedSeq: Long? = null,
 )
 
 data class TurnCompletion(val seq: Long, val succeeded: Boolean, val body: String)
@@ -78,8 +84,15 @@ object SessionReducer {
             "turn.end" -> {
                 running = false
                 closeStreaming(messages)
-                val succeeded = decode(event.data, TurnEndBody.serializer())?.ok != false
-                val body = messages.lastOrNull { it.role == "assistant" && !it.text.isNullOrEmpty() }?.text.orEmpty()
+                val end = decode(event.data, TurnEndBody.serializer())
+                val succeeded = end?.ok != false
+                val error = end?.text?.takeIf { !succeeded && it.isNotBlank() }
+                // The same row a later tail carries: role=error at the turn/end seq (§4).
+                if (error != null) {
+                    upsert(messages, MessageProjection(seq = event.seq, role = "error", text = error, ts = end.ts ?: nowMillis))
+                }
+                val body = error
+                    ?: messages.lastOrNull { it.role == "assistant" && !it.text.isNullOrEmpty() }?.text.orEmpty()
                 completion = TurnCompletion(event.seq, succeeded, body)
             }
         }
@@ -92,6 +105,28 @@ object SessionReducer {
         val newest = canonicalTail.lastOrNull()?.seq ?: return canonical(existing)
         val outside = canonical(existing).filter { it.seq < oldestSeq || it.seq > newest }
         return canonical(outside + canonicalTail)
+    }
+
+    /**
+     * Applies an incremental tail (`incrementalTail`, §4): [rows] are everything the
+     * host changed after [sinceSeq]. They replace local rows in `(sinceSeq, newest]`
+     * and overwrite older rows by seq (a tool row whose result arrived later).
+     */
+    fun mergeIncremental(existing: List<MessageProjection>, rows: List<MessageProjection>, sinceSeq: Long): List<MessageProjection> {
+        val changed = canonical(rows)
+        val newest = changed.lastOrNull()?.seq ?: return canonical(existing)
+        val kept = canonical(existing).filter { it.seq <= sinceSeq || it.seq > newest }
+        return canonical(kept + changed)
+    }
+
+    /** What a tail leaves the client synced to; null when it has nothing to anchor on. */
+    fun syncedSeq(tail: List<MessageProjection>, sinceSeq: Long? = null): Long? {
+        val newest = tail.maxOfOrNull { it.seq }
+        return when {
+            newest == null -> sinceSeq
+            sinceSeq == null -> newest
+            else -> maxOf(newest, sinceSeq)
+        }
     }
 
     /** Prepends a `s2c.history.page`; returns the merged list and how many rows were new. */

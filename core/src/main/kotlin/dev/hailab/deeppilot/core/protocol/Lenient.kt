@@ -5,10 +5,13 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.nullable
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.doubleOrNull
@@ -55,3 +58,31 @@ open class SkippingListSerializer<T>(private val element: KSerializer<T>) : KSer
 object MessageListSerializer : SkippingListSerializer<MessageProjection>(MessageProjection.serializer())
 
 object SessionListSerializer : SkippingListSerializer<SessionSummary>(SessionSummary.serializer())
+
+/**
+ * An optional object that decodes to null when it is absent, null or malformed.
+ * An extension field must never cost the frame that carries it (§3: a bad goal
+ * may not fail the whole SessionSummary).
+ */
+open class ForgivingSerializer<T : Any>(private val inner: KSerializer<T>) : KSerializer<T?> {
+    override val descriptor: SerialDescriptor = inner.descriptor.nullable
+
+    override fun deserialize(decoder: Decoder): T? {
+        if (decoder !is JsonDecoder) return inner.deserialize(decoder)
+        val element = decoder.decodeJsonElement()
+        if (element is JsonNull || element !is JsonObject) return null
+        return try {
+            decoder.json.decodeFromJsonElement(inner, element)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: T?) {
+        if (value == null) encoder.encodeNull() else inner.serialize(encoder, value)
+    }
+}
+
+object LenientGoalSerializer : ForgivingSerializer<SessionGoal>(SessionGoal.serializer())
+
+object LenientRoutesSerializer : ForgivingSerializer<HostRoutes>(HostRoutes.serializer())

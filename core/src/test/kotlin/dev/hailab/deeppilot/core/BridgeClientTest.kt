@@ -89,6 +89,7 @@ class BridgeClientTest {
         closeWith: Int? = null,
         challengeDelayMillis: Long = 0,
         onRequest: ((WebSocket, Envelope) -> Unit)? = null,
+        welcomeJson: String? = null,
     ) = object : WebSocketListener() {
         val challenge = AuthChallenge("bm9uY2U", audience, System.currentTimeMillis(), System.currentTimeMillis() + 30_000)
 
@@ -123,9 +124,9 @@ class BridgeClientTest {
                         return
                     }
                     val welcome = Welcome(protocolVersion = 2, deviceId = prove.deviceId, cursor = 7, resumed = false)
-                    webSocket.send(
-                        Envelope(type = FrameType.WELCOME, payload = BridgeJson.encodeToJsonElement(Welcome.serializer(), welcome)).encode(),
-                    )
+                    val payload = welcomeJson?.let { BridgeJson.parseToJsonElement(it) }
+                        ?: BridgeJson.encodeToJsonElement(Welcome.serializer(), welcome)
+                    webSocket.send(Envelope(type = FrameType.WELCOME, payload = payload).encode())
                 }
                 FrameType.SESSIONS_LIST -> webSocket.send(
                     Envelope(
@@ -139,14 +140,69 @@ class BridgeClientTest {
         }
     }
 
-    private fun client() = BridgeClient(
+    private fun client(watchSessions: () -> List<String>? = { null }) = BridgeClient(
         baseHttp = OkHttpClient(),
         signerFor = { signer },
         deviceName = { "Pixel" },
         appVersion = "0.1.0",
         cursorStore = cursors,
         parentScope = scope,
+        watchSessions = watchSessions,
     )
+
+    private fun deflated(text: String): okio.ByteString {
+        val deflater = java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION, true)
+        deflater.setInput(text.toByteArray(Charsets.UTF_8))
+        deflater.finish()
+        val out = java.io.ByteArrayOutputStream().apply { write(Envelope.COMPRESSED_FORMAT) }
+        val buffer = ByteArray(4096)
+        while (!deflater.finished()) out.write(buffer, 0, deflater.deflate(buffer))
+        deflater.end()
+        return okio.ByteString.of(*out.toByteArray())
+    }
+
+    @Test
+    fun proofDeclaresCompressionAndInterestAndDeflatedFramesAreRead() = runBlocking {
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(onRequest = { socket, request ->
+            if (request.type == FrameType.WORKSPACES_LIST) {
+                socket.send(deflated(Envelope(type = FrameType.WORKSPACES_SNAPSHOT, id = request.id,
+                    payload = BridgeJson.parseToJsonElement("""{"workspaces":[{"id":"w1","title":"demo"}]}""")).encode()))
+            }
+        })))
+        val client = client(watchSessions = { listOf("s1", "s1") + (2..40).map { "s$it" } })
+        client.start(credentials())
+        withTimeout(10_000) { client.state.first { it is ConnectionState.Authenticated } }
+        val prove = received.first { it.type == FrameType.AUTH_PROVE }.decode(AuthProve.serializer())!!
+        assertEquals(listOf("deflate-raw"), prove.acceptEncoding)
+        assertEquals(BridgeClient.MAX_WATCHED_SESSIONS, prove.watchSessions!!.size)
+        assertEquals("s1", prove.watchSessions!!.first())
+        assertEquals("s2", prove.watchSessions!![1])
+
+        val reply = client.request(FrameType.WORKSPACES_LIST)
+        assertEquals("w1", reply.decode(dev.hailab.deeppilot.core.protocol.WorkspacesSnapshot.serializer())!!.workspaces.single().id)
+        client.stop()
+    }
+
+    @Test
+    fun unreachableLanHintFallsBackToThePairedAddressAndWelcomeRoutesAreAdopted() = runBlocking {
+        val pin = SpkiFingerprint.of(serverCert.certificate)
+        val announced = """{"protocolVersion":2,"deviceId":"$deviceId","cursor":7,"capabilities":{"routeHints":true},
+            "routes":{"lan":{"urls":["https://192.168.7.7:3098","http://192.168.7.8:3098","https://8.8.8.8:3098"],"tlsFingerprint":"$pin"},
+                      "remote":{"url":"https://example.ts.net"}}}"""
+        server.enqueue(MockResponse().withWebSocketUpgrade(bridge(welcomeJson = announced)))
+        val client = client()
+        // A stale hint: nothing listens there, and the pin would not match anyway.
+        val stale = dev.hailab.deeppilot.core.protocol.HostRoutes(
+            lan = dev.hailab.deeppilot.core.protocol.LanRoute(listOf("https://192.168.254.253:9"), pin),
+        )
+        client.start(credentials().copy(routes = stale))
+        withTimeout(20_000) { client.state.first { it is ConnectionState.Authenticated } }
+        assertEquals(dev.hailab.deeppilot.core.bridge.Route.Kind.Paired, client.activeRoute!!.kind)
+        val routes = client.currentCredentials!!.routes!!
+        assertEquals(listOf("https://192.168.7.7:3098"), routes.lan!!.urls)
+        assertEquals("https://example.ts.net", routes.remote!!.url)
+        client.stop()
+    }
 
     private fun credentials(fingerprint: String? = SpkiFingerprint.of(serverCert.certificate)) = HostCredentials(
         profileId = "p1",
